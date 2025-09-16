@@ -23,5 +23,5 @@ type Order struct {
 	
 	// Foreign key relationship with User
 	UserID uint `json:"user_id" gorm:"not null" binding:"required"`
-	User   User `json:"user" gorm:"foreignKey:UserID"`
+	User   User `json:"user,omitempty" gorm:"foreignKey:UserID" binding:"-"`
 }
