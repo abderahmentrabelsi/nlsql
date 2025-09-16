@@ -10,15 +10,15 @@ func SetupRoutes(router *gin.Engine) {
 	{
 		// Setup user routes
 		SetupUserRoutes(api)
-		
+
 		// Setup order routes
 		SetupOrderRoutes(api)
 	}
-	
+
 	// Health check endpoint
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
-			"status": "OK",
+			"status":  "OK",
 			"message": "API is running",
 		})
 	})

@@ -4,6 +4,7 @@ import (
 	"abdo/config"
 	"abdo/models"
 	"errors"
+
 	"gorm.io/gorm"
 )
 
@@ -45,7 +46,7 @@ func (s *UserService) GetAllUsers() ([]models.User, error) {
 // UpdateUser updates an existing user
 func (s *UserService) UpdateUser(id uint, updatedUser *models.User) (*models.User, error) {
 	var user models.User
-	
+
 	// Check if user exists
 	if err := s.db.First(&user, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -53,18 +54,18 @@ func (s *UserService) UpdateUser(id uint, updatedUser *models.User) (*models.Use
 		}
 		return nil, err
 	}
-	
+
 	// Update fields
 	user.Name = updatedUser.Name
 	user.Email = updatedUser.Email
 	user.Phone = updatedUser.Phone
 	user.Address = updatedUser.Address
-	
+
 	// Save changes
 	if err := s.db.Save(&user).Error; err != nil {
 		return nil, err
 	}
-	
+
 	// Return updated user with orders
 	return s.GetUserByID(id)
 }
@@ -72,7 +73,7 @@ func (s *UserService) UpdateUser(id uint, updatedUser *models.User) (*models.Use
 // DeleteUser soft deletes a user and handles related orders
 func (s *UserService) DeleteUser(id uint) error {
 	var user models.User
-	
+
 	// Check if user exists
 	if err := s.db.First(&user, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -80,15 +81,15 @@ func (s *UserService) DeleteUser(id uint) error {
 		}
 		return err
 	}
-	
+
 	// Check if user has orders
 	var orderCount int64
 	s.db.Model(&models.Order{}).Where("user_id = ?", id).Count(&orderCount)
-	
+
 	if orderCount > 0 {
 		return errors.New("cannot delete user with existing orders")
 	}
-	
+
 	// Delete user (soft delete)
 	return s.db.Delete(&user).Error
 }

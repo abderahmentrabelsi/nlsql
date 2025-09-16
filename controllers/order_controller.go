@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"net/http"
-	"strconv"
 	"abdo/models"
 	"abdo/services"
-	
+	"net/http"
+	"strconv"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,15 +22,15 @@ func NewOrderController() *OrderController {
 // CreateOrder handles POST /orders
 func (oc *OrderController) CreateOrder(c *gin.Context) {
 	var order models.Order
-	
+
 	if err := c.ShouldBindJSON(&order); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid input data",
+			"error":   "Invalid input data",
 			"details": err.Error(),
 		})
 		return
 	}
-	
+
 	if err := oc.orderService.CreateOrder(&order); err != nil {
 		if err.Error() == "user not found" {
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -38,19 +38,19 @@ func (oc *OrderController) CreateOrder(c *gin.Context) {
 			})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to create order",
+				"error":   "Failed to create order",
 				"details": err.Error(),
 			})
 		}
 		return
 	}
-	
+
 	// Get the created order with user details
 	createdOrder, _ := oc.orderService.GetOrderByID(order.ID)
-	
+
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "Order created successfully",
-		"order": createdOrder,
+		"order":   createdOrder,
 	})
 }
 
@@ -64,7 +64,7 @@ func (oc *OrderController) GetOrder(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	order, err := oc.orderService.GetOrderByID(uint(id))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
@@ -72,7 +72,7 @@ func (oc *OrderController) GetOrder(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"order": order,
 	})
@@ -83,10 +83,10 @@ func (oc *OrderController) GetAllOrders(c *gin.Context) {
 	// Check for query parameters
 	status := c.Query("status")
 	userIDStr := c.Query("user_id")
-	
+
 	var orders []models.Order
 	var err error
-	
+
 	if status != "" {
 		orders, err = oc.orderService.GetOrdersByStatus(status)
 	} else if userIDStr != "" {
@@ -101,18 +101,18 @@ func (oc *OrderController) GetAllOrders(c *gin.Context) {
 	} else {
 		orders, err = oc.orderService.GetAllOrders()
 	}
-	
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve orders",
+			"error":   "Failed to retrieve orders",
 			"details": err.Error(),
 		})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"orders": orders,
-		"count": len(orders),
+		"count":  len(orders),
 	})
 }
 
@@ -126,16 +126,16 @@ func (oc *OrderController) UpdateOrder(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	var updatedOrder models.Order
 	if err := c.ShouldBindJSON(&updatedOrder); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid input data",
+			"error":   "Invalid input data",
 			"details": err.Error(),
 		})
 		return
 	}
-	
+
 	order, err := oc.orderService.UpdateOrder(uint(id), &updatedOrder)
 	if err != nil {
 		if err.Error() == "order not found" || err.Error() == "user not found" {
@@ -144,16 +144,16 @@ func (oc *OrderController) UpdateOrder(c *gin.Context) {
 			})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to update order",
+				"error":   "Failed to update order",
 				"details": err.Error(),
 			})
 		}
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Order updated successfully",
-		"order": order,
+		"order":   order,
 	})
 }
 
@@ -167,19 +167,19 @@ func (oc *OrderController) UpdateOrderStatus(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	var statusUpdate struct {
 		Status string `json:"status" binding:"required,oneof=pending processing shipped delivered cancelled"`
 	}
-	
+
 	if err := c.ShouldBindJSON(&statusUpdate); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid status data",
+			"error":   "Invalid status data",
 			"details": err.Error(),
 		})
 		return
 	}
-	
+
 	order, err := oc.orderService.UpdateOrderStatus(uint(id), statusUpdate.Status)
 	if err != nil {
 		if err.Error() == "order not found" {
@@ -188,16 +188,16 @@ func (oc *OrderController) UpdateOrderStatus(c *gin.Context) {
 			})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to update order status",
+				"error":   "Failed to update order status",
 				"details": err.Error(),
 			})
 		}
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Order status updated successfully",
-		"order": order,
+		"order":   order,
 	})
 }
 
@@ -211,7 +211,7 @@ func (oc *OrderController) DeleteOrder(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	if err := oc.orderService.DeleteOrder(uint(id)); err != nil {
 		if err.Error() == "order not found" {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -219,13 +219,13 @@ func (oc *OrderController) DeleteOrder(c *gin.Context) {
 			})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to delete order",
+				"error":   "Failed to delete order",
 				"details": err.Error(),
 			})
 		}
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Order deleted successfully",
 	})

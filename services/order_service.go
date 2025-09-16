@@ -5,6 +5,7 @@ import (
 	"abdo/models"
 	"errors"
 	"time"
+
 	"gorm.io/gorm"
 )
 
@@ -28,7 +29,7 @@ func (s *OrderService) CreateOrder(order *models.Order) error {
 		}
 		return err
 	}
-	
+
 	return s.db.Create(order).Error
 }
 
@@ -62,7 +63,7 @@ func (s *OrderService) GetOrdersByUserID(userID uint) ([]models.Order, error) {
 // UpdateOrder updates an existing order
 func (s *OrderService) UpdateOrder(id uint, updatedOrder *models.Order) (*models.Order, error) {
 	var order models.Order
-	
+
 	// Check if order exists
 	if err := s.db.First(&order, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -70,7 +71,7 @@ func (s *OrderService) UpdateOrder(id uint, updatedOrder *models.Order) (*models
 		}
 		return nil, err
 	}
-	
+
 	// If user is being changed, verify new user exists
 	if updatedOrder.UserID != order.UserID {
 		var user models.User
@@ -81,7 +82,7 @@ func (s *OrderService) UpdateOrder(id uint, updatedOrder *models.Order) (*models
 			return nil, err
 		}
 	}
-	
+
 	// Update fields
 	order.OrderNumber = updatedOrder.OrderNumber
 	order.Description = updatedOrder.Description
@@ -90,12 +91,12 @@ func (s *OrderService) UpdateOrder(id uint, updatedOrder *models.Order) (*models
 	order.OrderDate = updatedOrder.OrderDate
 	order.ShipDate = updatedOrder.ShipDate
 	order.UserID = updatedOrder.UserID
-	
+
 	// Save changes
 	if err := s.db.Save(&order).Error; err != nil {
 		return nil, err
 	}
-	
+
 	// Return updated order with user
 	return s.GetOrderByID(id)
 }
@@ -103,7 +104,7 @@ func (s *OrderService) UpdateOrder(id uint, updatedOrder *models.Order) (*models
 // DeleteOrder soft deletes an order
 func (s *OrderService) DeleteOrder(id uint) error {
 	var order models.Order
-	
+
 	// Check if order exists
 	if err := s.db.First(&order, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -111,7 +112,7 @@ func (s *OrderService) DeleteOrder(id uint) error {
 		}
 		return err
 	}
-	
+
 	// Delete order (soft delete)
 	return s.db.Delete(&order).Error
 }
@@ -119,7 +120,7 @@ func (s *OrderService) DeleteOrder(id uint) error {
 // UpdateOrderStatus updates only the status of an order
 func (s *OrderService) UpdateOrderStatus(id uint, status string) (*models.Order, error) {
 	var order models.Order
-	
+
 	// Check if order exists
 	if err := s.db.First(&order, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -127,21 +128,21 @@ func (s *OrderService) UpdateOrderStatus(id uint, status string) (*models.Order,
 		}
 		return nil, err
 	}
-	
+
 	// Update status
 	order.Status = status
-	
+
 	// If status is shipped, set ship date
 	if status == "shipped" && order.ShipDate == nil {
 		now := time.Now()
 		order.ShipDate = &now
 	}
-	
+
 	// Save changes
 	if err := s.db.Save(&order).Error; err != nil {
 		return nil, err
 	}
-	
+
 	// Return updated order with user
 	return s.GetOrderByID(id)
 }

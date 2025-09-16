@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"net/http"
-	"strconv"
 	"abdo/models"
 	"abdo/services"
-	
+	"net/http"
+	"strconv"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,26 +22,26 @@ func NewUserController() *UserController {
 // CreateUser handles POST /users
 func (uc *UserController) CreateUser(c *gin.Context) {
 	var user models.User
-	
+
 	if err := c.ShouldBindJSON(&user); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid input data",
+			"error":   "Invalid input data",
 			"details": err.Error(),
 		})
 		return
 	}
-	
+
 	if err := uc.userService.CreateUser(&user); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to create user",
+			"error":   "Failed to create user",
 			"details": err.Error(),
 		})
 		return
 	}
-	
+
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "User created successfully",
-		"user": user,
+		"user":    user,
 	})
 }
 
@@ -55,7 +55,7 @@ func (uc *UserController) GetUser(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	user, err := uc.userService.GetUserByID(uint(id))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
@@ -63,7 +63,7 @@ func (uc *UserController) GetUser(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"user": user,
 	})
@@ -74,12 +74,12 @@ func (uc *UserController) GetAllUsers(c *gin.Context) {
 	users, err := uc.userService.GetAllUsers()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve users",
+			"error":   "Failed to retrieve users",
 			"details": err.Error(),
 		})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"users": users,
 		"count": len(users),
@@ -96,16 +96,16 @@ func (uc *UserController) UpdateUser(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	var updatedUser models.User
 	if err := c.ShouldBindJSON(&updatedUser); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid input data",
+			"error":   "Invalid input data",
 			"details": err.Error(),
 		})
 		return
 	}
-	
+
 	user, err := uc.userService.UpdateUser(uint(id), &updatedUser)
 	if err != nil {
 		if err.Error() == "user not found" {
@@ -114,16 +114,16 @@ func (uc *UserController) UpdateUser(c *gin.Context) {
 			})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to update user",
+				"error":   "Failed to update user",
 				"details": err.Error(),
 			})
 		}
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "User updated successfully",
-		"user": user,
+		"user":    user,
 	})
 }
 
@@ -137,7 +137,7 @@ func (uc *UserController) DeleteUser(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	if err := uc.userService.DeleteUser(uint(id)); err != nil {
 		if err.Error() == "user not found" {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -149,13 +149,13 @@ func (uc *UserController) DeleteUser(c *gin.Context) {
 			})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to delete user",
+				"error":   "Failed to delete user",
 				"details": err.Error(),
 			})
 		}
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "User deleted successfully",
 	})
