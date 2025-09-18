@@ -129,11 +129,22 @@ verify_data() {
     curl -s $BASE_URL/users/1 | jq '.user.orders | length'
 }
 
+# Function to test NL→SQL endpoint
+test_nl2sql() {
+    echo ""
+    echo "🧠 Testing NL→SQL endpoint..."
+    curl -s -X POST $BASE_URL/nl2sql \
+      -H "Content-Type: application/json" \
+      -d '{
+        "question": "Total order amount by status in the last 30 days; include status and total; descending; top 5"
+      }' | jq '.'
+}
 # Main execution
 check_server
 create_users
 create_orders
 verify_data
+test_nl2sql
 
 echo ""
 echo "🎉 Test completed! Check the output above for results."
