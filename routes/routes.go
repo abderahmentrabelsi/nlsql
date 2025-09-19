@@ -15,7 +15,7 @@ func SetupRoutes(router *gin.Engine) {
 		SetupOrderRoutes(api)
 
 		// Setup NL→SQL routes
-		SetupNL2SQLRoutes(api)
+		SetupNLSQLRoutes(api)
 	}
 
 	// Health check endpoint

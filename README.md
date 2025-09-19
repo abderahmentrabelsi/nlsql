@@ -1,205 +1,216 @@
-# NL → SQL (Local, Free, Production‑Ready)
+# NL→SQL for ERP — Go + FastAPI + llama.cpp (Qwen GGUF)
 
-Fast, safe Natural Language → MySQL SELECT using a local model (llama.cpp), XiYan MCP, and this Go API as the single public endpoint. No keys. No cloud bills. Cold‑start works from your schema (DSN).
+Production-grade natural language to SQL pipeline built around a local Qwen 2.5 7B Instruct (GGUF) model via llama.cpp, a Python FastAPI microservice for generation/validation, and a Go API for safe SQL execution and integration.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Runtime-local%20only-2ea44f?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Safety-SELECT%20only-blue?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/MCP-XiYan-orange?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Language-Go%201.21+-00ADD8?style=for-the-badge&logo=go" />
-</p>
+Key goals
 
----
+- High precision and accuracy on ERP-style queries
+- Deterministic generation (temperature 0) with schema grounding
+- Hallucination detection with interactive repair suggestions
+- Safe, SELECT-only execution with transparent SQL
 
-## TL;DR
-
-- You ask in plain English; the API returns a single safe `SELECT` query (never executed).
-- Everything runs locally: a quantized GGUF model via llama.cpp, orchestrated by XiYan MCP.
-- Start three processes: local model (port 5090) → XiYan (7337) → Go API (8080).
+Architecture
 
 ```
-curl -s -X POST http://localhost:8080/api/v1/nl2sql \
+ ┌──────────────────────────┐        ┌──────────────────────────────────────┐
+ │        Frontend         │  NL    │                Go API                │
+ │  (forms + dropdown UX)  ├────────▶  /api/v1/nl2sql/* routes             │
+ └──────────────────────────┘        │  routes/nl_sql_routes.go             │
+                                      │  controllers/nl_sql_controller.go    │
+                                      │  services/nl_sql_service.go          │
+                                      └──────────────┬───────────────┬──────┘
+                                                     │               │
+                                          Generate/Repair/Feedback   │ Execute (SELECT-only)
+                                                     │               │
+                                                     ▼               ▼
+                                      ┌──────────────────────────────────────┐
+                                      │          Python FastAPI NLSQL        │
+                                      │  python_api/main.py                  │
+                                      │  - Schema grounding from             │
+                                      │    python_api/schema.json            │
+                                      │  - llama.cpp via Qwen GGUF           │
+                                      │  - SQL validation + suggestions      │
+                                      └───────────────────┬──────────────────┘
+                                                          │
+                                                          ▼
+                                          ┌────────────────────────────────┐
+                                          │        MySQL (via GORM)        │
+                                          │  config/database.go            │
+                                          │  models/*.go                   │
+                                          └────────────────────────────────┘
+```
+
+Repository layout
+
+- [main.go](main.go): bootstraps the Go server and routes
+- [config/database.go](config/database.go): DB connection + migrations
+- [models/user.go](models/user.go), [models/order.go](models/order.go): sample ERP tables
+- [services/nl_sql_service.go](services/nl_sql_service.go): HTTP client to Python and safe SQL execution
+- [controllers/nl_sql_controller.go](controllers/nl_sql_controller.go): NL→SQL/repair/feedback/execute endpoints
+- [routes/nl_sql_routes.go](routes/nl_sql_routes.go), [routes/routes.go](routes/routes.go): route wiring
+- [python_api/main.py](python_api/main.py): llama.cpp-backed generator + validator
+- [python_api/schema.json](python_api/schema.json): ERP schema + relationships
+- [llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf](llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf): local model
+
+Quick start
+
+Prerequisites
+
+- Python 3.10+ and Go 1.21+
+- MySQL running and reachable (for execute)
+- jq: brew install jq
+
+1) Start Python NL→SQL service
+
+```
+cd ./python_api
+python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip
+pip install "llama-cpp-python==0.2.86" fastapi uvicorn pydantic sqlparse
+export LLAMA_MODEL_PATH="$(pwd)/../llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+# Optional tuning
+export LLAMA_THREADS=8
+export LLAMA_CTX=4096
+uvicorn main:app --host 127.0.0.1 --port 7337
+```
+
+Warm the model once (first call can take 1–3 minutes):
+
+```
+curl -sS -X POST http://127.0.0.1:7337/nl2sql \
   -H 'Content-Type: application/json' \
-  -d '{"question":"Orders count per status in last 30 days, descending","dsn":"root:1234@tcp(127.0.0.1:3306)/abdo?parseTime=true&charset=utf8mb4"}' | jq
+  -d '{"query":"ping"}' | jq .
 ```
 
----
-
-## Architecture
+2) Start Go API
 
 ```
-(Browser/Postman)
-      │
-      ▼
- Go API (8080)  ── calls ──►  XiYan MCP (7337)  ── calls ──►  llama.cpp (5090, GGUF)
-      │                               │                          │
-      └──────────── returns one safe SELECT ◄─────────────────────┘
+cd ./    # project root
+test -f .env || cp .env.example .env
+export NLSQL_URL=http://127.0.0.1:7337
+export NLSQL_TIMEOUT_SECONDS=600   # allow long first request
+go run .
 ```
 
-Key files:
-- Controller: [`controllers.NL2SQLController.GenerateSQL()`](controllers/nl2sql_controller.go:37)
-- Service: [`services.NL2SQLService.GenerateSQL()`](services/nl2sql_service.go:68)
-- XiYan client: [`services.NL2SQLService.callXiYan()`](services/nl2sql_service.go:497)
-- Safety filter: [`services.extractAndSanitize()`](services/nl2sql_service.go:397)
-- XiYan config: [`config/xiyan.yml`](config/xiyan.yml:1)
+Health checks
 
----
-
-## Quick Start (copy/paste)
-
-1) Environment
-- Copy example and edit DB creds:
 ```
-cp .env.example .env
-# Fill DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
-# XiYan endpoint for the Go API:
-# XIYAN_URL=http://127.0.0.1:7337
-# XIYAN_SQL_PATH=/nl2sql
+curl -s http://127.0.0.1:7337/health | jq .
+curl -s http://localhost:8080/health | jq .
 ```
 
-2) Download model (GGUF)
-- Recommended: Qwen2.5‑7B‑Instruct Q4_K_M (≈4 GB)
-  - TheBloke: https://huggingface.co/TheBloke/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf?download=true
-  - bartowski: https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf?download=true
-- Save to: `./llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf`
+End-to-end usage
 
-3) Start local model server (OpenAI‑compatible)
-```
-python3 -m venv .venv-llama
-./.venv-llama/bin/python -m pip install --upgrade pip
-./.venv-llama/bin/pip install "llama-cpp-python[server]" --only-binary=:all: || \
-./.venv-llama/bin/pip install "llama-cpp-python[server]"
+Generate SQL
 
-./.venv-llama/bin/python -m llama_cpp.server \
-  --model ./llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
-  --host 127.0.0.1 \
-  --port 5090 \
-  --n_ctx 4096 \
-  --chat_format openai
 ```
-- Verify: `curl -s -i http://127.0.0.1:5090/v1/models`
-
-4) Start XiYan MCP
-```
-python3 -m venv .venv-xiyan
-./.venv-xiyan/bin/python -m pip install --upgrade pip
-./.venv-xiyan/bin/pip install xiyan-mcp-server
-
-env YML=./config/xiyan.yml ./.venv-xiyan/bin/python -m xiyan_mcp_server
-```
-- Quick checks:
-```
-curl -s -i http://127.0.0.1:7337/sse
-curl -s -i -X POST http://127.0.0.1:7337/nl2sql \
-  -H "Content-Type: application/json" \
-  -d '{"question":"Ping test","dsn":"root:1234@tcp(127.0.0.1:3306)/abdo?parseTime=true&charset=utf8mb4","sql_only":true,"read_only":true,"row_limit":5}'
+curl -sS -X POST http://localhost:8080/api/v1/nl2sql \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"total order amount per user"}' | jq .
 ```
 
-5) Run the Go API
-```
-go run ./main.go
-```
-- Health: `curl -s http://127.0.0.1:8080/health`
+Repair with suggestions (simulate hallucinated tables)
 
----
-
-## API Contract
-
-Endpoint: `POST /api/v1/nl2sql`
-
-Request JSON:
 ```
-{
-  "question": "Total sales by region in 2024, include region and total, top 5 descending",
-  "dsn": "root:1234@tcp(127.0.0.1:3306)/abdo?parseTime=true&charset=utf8mb4"
-}
-```
-Notes:
-- `dsn` optional; if omitted, uses `.env` DB settings
-- DSN must include `/dbname` so `SELECT DATABASE()` returns non‑empty
-
-Response JSON:
-```
-{
-  "sql": "SELECT … LIMIT 100",
-  "model": "xiyan-mcp",
-  "used_dsn": "env" | "request-dsn",
-  "safe": true,
-  "note": "LIMIT 100 appended"
-}
+curl -sS -X POST http://localhost:8080/api/v1/nl2sql/repair \
+  -H 'Content-Type: application/json' \
+  -d '{"sql":"SELECT oh.order_date, ol.item_name FROM orderhead oh JOIN orderline ol ON oh.id = ol.order_id;","corrections":{"tables":{"orderhead":"orders","orderline":"orders"}}}' | jq .
 ```
 
----
+Execute generated SQL (SELECT-only; requires DB)
 
-## Test DSN vs ERP DSN (now vs later)
-
-Today (PoC)
-- We include a small Users/Orders schema to validate the NL→SQL pipeline.
-- Example DSN: `root:1234@tcp(127.0.0.1:3306)/abdo?parseTime=true&charset=utf8mb4`
-
-ERP next (staging/test)
-- Provide a read‑only DSN to a staging clone of your Cetec ERP.
-- Nothing changes in code: send the ERP DSN in the POST body or point `.env` to ERP and omit DSN.
-
-Recommended MySQL user:
 ```
-CREATE USER 'nl2sql_ro'@'%' IDENTIFIED BY 'REDACTED';
-GRANT SELECT ON erp_test.* TO 'nl2sql_ro'@'%';
-FLUSH PRIVILEGES;
+SQL=$(curl -sS -X POST http://localhost:8080/api/v1/nl2sql \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"total order amount per user"}' | jq -r '.sql')
+jq -nc --arg sql "$SQL" '{sql:$sql}' | curl -sS -X POST \
+  http://localhost:8080/api/v1/nl2sql/execute \
+  -H 'Content-Type: application/json' \
+  --data-binary @- | jq .
 ```
 
----
+Error feedback loop (let the model fix real DB errors)
 
-## Safety (always on)
+```
+curl -sS -X POST http://localhost:8080/api/v1/nl2sql/feedback \
+  -H 'Content-Type: application/json' \
+  -d '{"sql":"SELECT u.name, SUM(o.ammount) FROM users u JOIN orders o ON o.user_id=u.id GROUP BY u.name;","error":"Unknown column ammount in field list"}' | jq .
+```
 
-- Only `SELECT` statements allowed
-- Blocks DDL/DML/comments (DROP/DELETE/UPDATE/INSERT/ALTER/CREATE and /* */ --)
-- Auto‑appends `LIMIT 100` when unbounded
+How it works
 
-Implementation: [`services.extractAndSanitize()`](services/nl2sql_service.go:397)
+1) Schema grounding
+   - Full ERP schema and relationships live in [python_api/schema.json](python_api/schema.json).
+   - The Python service injects this JSON, plus few-shot examples, into the prompt to constrain generation.
 
----
+2) Deterministic generation
+   - llama.cpp with Qwen 2.5 7B Instruct GGUF, temperature 0, bounded max tokens.
+   - Prompt crafted to emit a single MySQL SELECT statement ending with a semicolon.
 
-## Troubleshooting
+3) Validation and suggestions
+   - SQL is parsed to extract used tables and columns.
+   - Any table/column not in the schema is flagged as a hallucination.
+   - Closest matches suggested via difflib to repair interactively.
 
-- XiYan prints “Loading configuration …” and nothing else
-  - Ensure local model server is up: `curl http://127.0.0.1:5090/v1/models`
-  - Check [`config/xiyan.yml`](config/xiyan.yml:1) → `model.url` matches your server
+4) Repair
+   - Frontend can post corrections (tables/columns); backend applies them and re-validates.
 
-- llama.cpp shows “tensor … not within file bounds”
-  - The `.gguf` file is corrupted or incomplete. Re‑download the GGUF (~4 GB).
+5) Error feedback loop
+   - If execution fails (e.g., “Unknown column”), the error text is fed back into a corrective prompt for regeneration.
 
-- `dsn must include a database`
-  - Include `/dbname` in the DSN, e.g., `/abdo`
+6) Safe execution
+   - Go service enforces single-statement, SELECT-only, and blocks DDL/DML keywords before execution.
+   - Execution happens via GORM’s Raw on the configured MySQL connection.
 
-- Ports
-  - Model: 5090; XiYan: 7337; API: 8080
-  - `lsof -iTCP -sTCP:LISTEN -nP | grep -E '(:5090|:7337|:8080)'`
+API surface
 
----
+Go API (prefix /api/v1)
 
-## FAQ
+- POST /nl2sql → generate SQL + validation
+- POST /nl2sql/repair → apply user corrections and revalidate
+- POST /nl2sql/feedback → regenerate using DB error feedback
+- POST /nl2sql/execute → execute validated SELECT and return rows
 
-Q: Do we need hints or example SQL?  
-A: No. Cold‑start works with only your schema (via DSN). Hints are optional for ambiguous business terms.
+Python FastAPI
 
-Q: Why do we need “llama.cpp”?  
-A: It’s a lightweight local server that loads your `.gguf` model and exposes a standard `/v1` HTTP API which XiYan can call.
+- POST /nl2sql → generate and validate SQL
+- POST /nl2sql/repair → apply corrections and validate
+- POST /nl2sql/feedback → fix SQL using error text
+- GET /health → basic status
 
-Q: Can we switch the local runtime?  
-A: Yes. Use LM Studio or Ollama; just set `model.url` in [`config/xiyan.yml`](config/xiyan.yml:1) to that server’s URL.
+Safety, constraints, and transparency
 
-Q: Does the API execute SQL?  
-A: Never. It returns a single safe `SELECT` string only.
+- SELECT-only enforcement and multi-statement blocking in the Go layer
+- SQL always returned to users for transparency
+- No schema writes; migrations only at startup via GORM
 
----
+Performance and tuning
 
-## Code Anchors
+- First request warms the model and can take 1–3 minutes; later calls are fast
+- Environment variables:
+  - LLAMA_THREADS, LLAMA_CTX, LLAMA_MAX_TOKENS
+  - NLSQL_TIMEOUT_SECONDS (Go client timeout)
+- Keep few-shot examples concise to reduce latency
 
-- Controller: [`controllers.NL2SQLController.GenerateSQL()`](controllers/nl2sql_controller.go:37)
-- Service: [`services.NL2SQLService.GenerateSQL()`](services/nl2sql_service.go:68)
-- XiYan client: [`services.NL2SQLService.callXiYan()`](services/nl2sql_service.go:497)
-- Safety: [`services.extractAndSanitize()`](services/nl2sql_service.go:397)
-- XiYan config: [`config/xiyan.yml`](config/xiyan.yml:1)
+Troubleshooting
 
----
+- “context deadline exceeded”: increase NLSQL_TIMEOUT_SECONDS and warm Python with a direct call
+- “Unknown column/table”: use /nl2sql/repair suggestions or feed the exact DB error to /nl2sql/feedback
+- Very slow generations: reduce LLAMA_MAX_TOKENS or LLAMA_CTX, or try a smaller quantization
+
+Roadmap (optional)
+
+- Schema slicing (only the relevant subset of tables for the query)
+- Query/result caching
+- Column-level dropdown suggestions in UI
+- Richer few-shots covering aggregates/filters/joins
+
+Credits
+
+- Local model: [llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf](llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf)
+- Generation/validation service: [python_api/main.py](python_api/main.py)
+- Go integration and execution: [services/nl_sql_service.go](services/nl_sql_service.go), [controllers/nl_sql_controller.go](controllers/nl_sql_controller.go), [routes/nl_sql_routes.go](routes/nl_sql_routes.go)
+
+## Author
+
+- Abderahmen Trabelsi — GitHub: [abderahmentrabelsi](https://github.com/abderahmentrabelsi)

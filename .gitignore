@@ -84,3 +84,4 @@ Dockerfile.tmp
 *~
 *.bak
 *.backup
+llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf

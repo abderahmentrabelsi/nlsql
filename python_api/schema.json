@@ -1,0 +1,48 @@
+{
+  "tables": {
+    "users": [
+      "id",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "name",
+      "email",
+      "phone",
+      "address"
+    ],
+    "orders": [
+      "id",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "order_number",
+      "description",
+      "amount",
+      "status",
+      "order_date",
+      "ship_date",
+      "user_id"
+    ]
+  },
+  "relationships": [
+    {
+      "from_table": "orders",
+      "from_column": "user_id",
+      "to_table": "users",
+      "to_column": "id"
+    }
+  ],
+  "services": {
+    "orderService": {
+      "methods": {
+        "getOrdersByUser": ["user_id"],
+        "getOrdersByStatus": ["status"]
+      }
+    },
+    "userService": {
+      "methods": {
+        "getUserByEmail": ["email"]
+      }
+    }
+  }
+}
