@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any, Tuple, Set
 from llama_cpp import Llama
@@ -9,16 +9,29 @@ from pathlib import Path
 import os
 import re
 import threading
+import pymysql
+from dotenv import load_dotenv
 
 app = FastAPI(title="NL→SQL Service", version="0.1.0")
 
 _llm_lock = threading.Lock()
 _llm_instance: Optional[Llama] = None
 _schema_cache: Optional[Dict[str, Any]] = None
+_schema_lock = threading.Lock()
 _project_root = Path(__file__).resolve().parents[1]
+# Load environment from project root .env if available (for DB_* and toggles)
+load_dotenv(str(_project_root / ".env"))
 
 MODEL_PATH = os.getenv("LLAMA_MODEL_PATH", str(_project_root / "llm-models" / "Qwen2.5-7B-Instruct-Q4_K_M.gguf"))
 SCHEMA_PATH = os.getenv("SCHEMA_PATH", str(Path(__file__).resolve().parent / "schema.json"))
+# DB config for optional live schema reflection
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = int(os.getenv("DB_PORT", "3306"))
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_NAME = os.getenv("DB_NAME", "")
+SCHEMA_DB_FALLBACK = os.getenv("SCHEMA_DB_FALLBACK", "true").lower() in ("1", "true", "yes", "y")
+SCHEMA_SLICE_MAX_TABLES = int(os.getenv("SCHEMA_SLICE_MAX_TABLES", "12"))
 
 
 def get_llm() -> Llama:
@@ -34,12 +47,143 @@ def get_llm() -> Llama:
         return _llm_instance
 
 
-def get_schema() -> Dict[str, Any]:
+def load_schema_from_file() -> Dict[str, Any]:
+    with open(SCHEMA_PATH, "r") as f:
+        return json.load(f)
+
+
+def load_schema_from_db() -> Dict[str, Any]:
+    # Build schema from INFORMATION_SCHEMA
+    conn = pymysql.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
+    )
+    try:
+        with conn.cursor() as cur:
+            # Tables and columns
+            cur.execute(
+                """
+                SELECT TABLE_NAME, COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = %s
+                ORDER BY TABLE_NAME, ORDINAL_POSITION
+                """,
+                (DB_NAME,),
+            )
+            tables: Dict[str, List[str]] = {}
+            for row in cur.fetchall():
+                t = row["TABLE_NAME"]
+                c = row["COLUMN_NAME"]
+                tables.setdefault(t, []).append(c)
+
+            # Relationships (FKs)
+            cur.execute(
+                """
+                SELECT
+                  TABLE_NAME AS from_table,
+                  COLUMN_NAME AS from_column,
+                  REFERENCED_TABLE_NAME AS to_table,
+                  REFERENCED_COLUMN_NAME AS to_column
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE TABLE_SCHEMA = %s
+                  AND REFERENCED_TABLE_NAME IS NOT NULL
+                """,
+                (DB_NAME,),
+            )
+            relationships: List[Dict[str, str]] = []
+            for row in cur.fetchall():
+                relationships.append(
+                    {
+                        "from_table": row["from_table"],
+                        "from_column": row["from_column"],
+                        "to_table": row["to_table"],
+                        "to_column": row["to_column"],
+                    }
+                )
+    finally:
+        conn.close()
+
+    return {"tables": tables, "relationships": relationships}
+
+
+def refresh_schema(force: bool = False) -> Dict[str, Any]:
     global _schema_cache
-    if _schema_cache is None:
-        with open(SCHEMA_PATH, "r") as f:
-            _schema_cache = json.load(f)
-    return _schema_cache
+    with _schema_lock:
+        if force or _schema_cache is None:
+            _schema_cache = load_schema_from_file()
+        return _schema_cache
+
+
+def get_schema() -> Dict[str, Any]:
+    return refresh_schema(False)
+
+
+def tokenize_nl(nl: str) -> Set[str]:
+    text = nl.lower()
+    toks = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text))
+    # add simple singulars
+    singulars = set()
+    for t in list(toks):
+        if len(t) > 3 and t.endswith("s"):
+            singulars.add(t[:-1])
+    return toks.union(singulars)
+
+
+def slice_schema_for_query(nl: str, schema: Dict[str, Any]) -> Tuple[Dict[str, Any], Set[str]]:
+    tokens = tokenize_nl(nl)
+    tables_def: Dict[str, List[str]] = schema.get("tables", {})
+    rels: List[Dict[str, str]] = schema.get("relationships", [])
+    scores: Dict[str, int] = {}
+    for t, cols in tables_def.items():
+        t_low = t.lower()
+        score = 0
+        if t_low in tokens:
+            score += 10
+        for tok in tokens:
+            if tok and tok in t_low:
+                score += 2
+        for c in cols:
+            c_low = c.lower()
+            if c_low in tokens:
+                score += 5
+            else:
+                for tok in tokens:
+                    if tok and tok in c_low:
+                        score += 1
+        if score > 0:
+            scores[t] = score
+    # choose top tables by score
+    selected: List[str] = []
+    for t, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True):
+        if len(selected) >= SCHEMA_SLICE_MAX_TABLES:
+            break
+        selected.append(t)
+    # if nothing matched, pick a small default slice
+    if not selected:
+        defaults = [t for t in ("users", "orders") if t in tables_def]
+        selected = defaults or list(tables_def.keys())[: min(SCHEMA_SLICE_MAX_TABLES, len(tables_def))]
+    # expand with neighbors via relationships (to enable joins)
+    sel_set: Set[str] = set(selected)
+    for r in rels:
+        if len(sel_set) >= SCHEMA_SLICE_MAX_TABLES:
+            break
+        if r.get("from_table") in sel_set and r.get("to_table") not in sel_set:
+            sel_set.add(r.get("to_table"))
+        if r.get("to_table") in sel_set and r.get("from_table") not in sel_set:
+            sel_set.add(r.get("from_table"))
+    # build sliced schema
+    sliced_tables = {t: tables_def[t] for t in sel_set if t in tables_def}
+    sliced_rels = [r for r in rels if r.get("from_table") in sel_set and r.get("to_table") in sel_set]
+    sliced: Dict[str, Any] = {"tables": sliced_tables, "relationships": sliced_rels}
+    # include services if present (unchanged; optional)
+    if "services" in schema:
+        sliced["services"] = schema["services"]
+    return sliced, sel_set
 
 
 class NLQuery(BaseModel):
@@ -274,24 +418,71 @@ def apply_corrections(sql: str, corrections: Dict[str, Dict[str, str]]) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_path": MODEL_PATH, "schema_path": SCHEMA_PATH}
+    return {
+        "status": "ok",
+        "model_path": MODEL_PATH,
+        "schema_path": SCHEMA_PATH,
+        "db_fallback": SCHEMA_DB_FALLBACK,
+        "db_name": DB_NAME,
+    }
 
 
 @app.get("/schema")
-def schema_endpoint():
-    return get_schema()
+def schema_endpoint(
+    reload: bool = Query(False, description="Force reload of schema from DB/file"),
+    q: Optional[str] = Query(None, description="Natural language query to slice schema for"),
+    do_slice: bool = Query(False, alias="slice", description="Return sliced schema subset for the provided query"),
+):
+    base = refresh_schema(force=reload)
+    if do_slice and q:
+        sliced, selected = slice_schema_for_query(q, base)
+        return {"schema": sliced, "selected_tables": sorted(list(selected))}
+    return base
 
 
 @app.post("/nl2sql")
 def nl2sql_endpoint(payload: NLQuery):
-    schema = get_schema()
-    prompt = build_prompt(payload.query, schema, payload.few_shots)
-    sql = run_llm(prompt)
-    analysis = validate_sql(sql, schema)
-    return {
-        "sql": sql,
-        **analysis
+    # 1) Always rely on JSON schema first (deterministic)
+    base_schema = load_schema_from_file()
+    sliced1, selected1 = slice_schema_for_query(payload.query, base_schema)
+    prompt1 = build_prompt(payload.query, sliced1, payload.few_shots)
+    sql1 = run_llm(prompt1)
+    analysis1 = validate_sql(sql1, base_schema)
+    resp: Dict[str, Any] = {
+        "sql": sql1,
+        **analysis1,
+        "schema_source": "json",
+        "sliced_tables": sorted(list(selected1)),
     }
+
+    # 2) Optional DB fallback: if invalid due to new columns/tables not in JSON
+    if not analysis1.get("valid") and SCHEMA_DB_FALLBACK and DB_NAME:
+        db_schema = load_schema_from_db()
+        # determine if DB adds missing tables/columns
+        needs_retry = False
+        for t in analysis1.get("invalid_tables", []):
+            if t in db_schema.get("tables", {}):
+                needs_retry = True
+                break
+        if not needs_retry:
+            for pair in analysis1.get("invalid_columns", []):
+                t = pair.get("table")
+                c = pair.get("column")
+                if t and t in db_schema.get("tables", {}) and c in db_schema["tables"][t]:
+                    needs_retry = True
+                    break
+        if needs_retry:
+            sliced2, selected2 = slice_schema_for_query(payload.query, db_schema)
+            sql2 = run_llm(build_prompt(payload.query, sliced2, payload.few_shots))
+            analysis2 = validate_sql(sql2, db_schema)
+            resp = {
+                "sql": sql2,
+                **analysis2,
+                "schema_source": "db_fallback",
+                "sliced_tables": sorted(list(selected2)),
+            }
+
+    return resp
 
 
 @app.post("/nl2sql/repair")

@@ -54,6 +54,8 @@ type NLSQLResponse struct {
 	InvalidColumns []InvalidColumn `json:"invalid_columns"`
 	Suggestions    Suggestions     `json:"suggestions"`
 	Valid          bool            `json:"valid"`
+	SchemaSource   string          `json:"schema_source,omitempty"`
+	SlicedTables   []string        `json:"sliced_tables,omitempty"`
 }
 
 // HTTP client to call the Python NL→SQL service

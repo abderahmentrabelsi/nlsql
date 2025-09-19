@@ -99,6 +99,34 @@ curl -s http://127.0.0.1:7337/health | jq .
 curl -s http://localhost:8080/health | jq .
 ```
 
+Verification and diagnostics
+
+- Check DB fallback flag
+```
+curl -s http://127.0.0.1:7337/health | jq '{db_fallback:.db_fallback,db:.db_name}'
+```
+
+- Preview schema slicing (no generation)
+```
+curl -s 'http://127.0.0.1:7337/schema?slice=true&q=sum%20cost%20per%20user' | jq '.selected_tables,.schema.tables|keys'
+```
+
+- JSON-first path (should show schema_source "json")
+```
+curl -sS -X POST http://localhost:8080/api/v1/nl2sql \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"total order amount per user"}' | jq '{source:.schema_source,sliced:.sliced_tables,valid:.valid}'
+```
+
+- DB fallback path (uses new column e.g. "cost")
+```
+curl -sS -X POST http://localhost:8080/api/v1/nl2sql \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"sum cost per user"}' | jq '{source:.schema_source,sliced:.sliced_tables,valid:.valid}'
+```
+
+Tip: when splitting curl across lines in zsh, end lines with backslashes.
+
 End-to-end usage
 
 Generate SQL
@@ -139,28 +167,42 @@ curl -sS -X POST http://localhost:8080/api/v1/nl2sql/feedback \
 
 How it works
 
-1) Schema grounding
-   - Full ERP schema and relationships live in [python_api/schema.json](python_api/schema.json).
-   - The Python service injects this JSON, plus few-shot examples, into the prompt to constrain generation.
+1) Schema grounding (JSON-first)
+   - Default source of truth is [python_api/schema.json](python_api/schema.json).
+   - The Python service injects this JSON, plus few-shot examples, into the prompt.
+   - For performance, the service slices the schema to only relevant tables based on the query (see below).
 
-2) Deterministic generation
+2) Schema slicing (performance)
+   - Only a subset of tables likely relevant to the NL query are included (keyword scoring + relationship expansion).
+   - Max tables is configurable via SCHEMA_SLICE_MAX_TABLES (default 12).
+
+3) DB fallback (only when JSON is missing objects)
+   - If generated SQL is invalid due to missing tables/columns not present in JSON, the service retries with live DB schema reflection automatically.
+   - Controlled via SCHEMA_DB_FALLBACK (default true) and DB_* envs.
+
+4) Deterministic generation
    - llama.cpp with Qwen 2.5 7B Instruct GGUF, temperature 0, bounded max tokens.
    - Prompt crafted to emit a single MySQL SELECT statement ending with a semicolon.
 
-3) Validation and suggestions
+5) Validation and suggestions
    - SQL is parsed to extract used tables and columns.
    - Any table/column not in the schema is flagged as a hallucination.
    - Closest matches suggested via difflib to repair interactively.
 
-4) Repair
+6) Repair
    - Frontend can post corrections (tables/columns); backend applies them and re-validates.
 
-5) Error feedback loop
+7) Error feedback loop
    - If execution fails (e.g., “Unknown column”), the error text is fed back into a corrective prompt for regeneration.
 
-6) Safe execution
+8) Safe execution
    - Go service enforces single-statement, SELECT-only, and blocks DDL/DML keywords before execution.
    - Execution happens via GORM’s Raw on the configured MySQL connection.
+
+Configuration
+- SCHEMA_DB_FALLBACK=true   # retry with live DB schema if JSON misses objects
+- SCHEMA_SLICE_MAX_TABLES=12
+- DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME   # required for fallback to work
 
 API surface
 
