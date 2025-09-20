@@ -45,8 +45,13 @@ def get_llm() -> Llama:
         if _llm_instance is None:
             _llm_instance = Llama(
                 model_path=MODEL_PATH,
-                n_ctx=int(os.getenv("LLAMA_CTX", "8192")),
+                # faster defaults for local dev; override via env
+                n_ctx=int(os.getenv("LLAMA_CTX", "2048")),
                 n_threads=int(os.getenv("LLAMA_THREADS", str(os.cpu_count() or 4))),
+                n_gpu_layers=int(os.getenv("LLAMA_N_GPU_LAYERS", "-1")),  # Metal offload (Apple Silicon)
+                n_batch=int(os.getenv("LLAMA_N_BATCH", "128")),
+                use_mmap=os.getenv("LLAMA_USE_MMAP", "true").lower() in ("1", "true", "yes", "y"),
+                use_mlock=os.getenv("LLAMA_USE_MLOCK", "false").lower() in ("1", "true", "yes", "y"),
                 verbose=False,
             )
         return _llm_instance
@@ -274,7 +279,8 @@ def build_few_shots(schema: Dict[str, Any]) -> List[Dict[str, str]]:
 
 
 def build_prompt(nl: str, schema: Dict[str, Any], few_shots: Optional[List[Dict[str, str]]] = None) -> str:
-    schema_text = json.dumps(schema, indent=2)
+    # compact JSON to reduce prompt tokens
+    schema_text = json.dumps(schema, separators=(",", ":"), ensure_ascii=False)
     if not few_shots:
         few_shots = build_few_shots(schema)
     shots = ""
@@ -303,7 +309,7 @@ def run_llm(prompt: str) -> str:
     out = llm(
         prompt=prompt,
         temperature=0.0,
-        max_tokens=int(os.getenv("LLAMA_MAX_TOKENS", "256")),
+        max_tokens=int(os.getenv("LLAMA_MAX_TOKENS", "128")),
         top_p=1.0,
         stop=["User:", "Assistant:", "\n\n"],
         echo=False,

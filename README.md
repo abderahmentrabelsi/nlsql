@@ -51,6 +51,12 @@ Repository layout
 - [python_api/main.py](python_api/main.py): llama.cpp-backed generator + validator
 - [python_api/schema.json](python_api/schema.json): ERP schema + relationships
 - [llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf](llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf): local model
+- Frontend (React + Vite):
+  - [frontend/vite.config.ts](frontend/vite.config.ts)
+  - [frontend/src/App.tsx](frontend/src/App.tsx)
+  - [frontend/src/components/ChatPanel.tsx](frontend/src/components/ChatPanel.tsx)
+  - [frontend/src/components/HistoryPanel.tsx](frontend/src/components/HistoryPanel.tsx)
+  - [frontend/src/components/ui/toast.tsx](frontend/src/components/ui/toast.tsx)
 
 Quick start
 
@@ -63,15 +69,13 @@ Prerequisites
 1) Start Python NL→SQL service
 
 ```
-cd ./python_api
-python3 -m venv .venv && source .venv/bin/activate
-pip install --upgrade pip
-pip install "llama-cpp-python==0.2.86" fastapi uvicorn pydantic sqlparse
-export LLAMA_MODEL_PATH="$(pwd)/../llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
-# Optional tuning
-export LLAMA_THREADS=8
-export LLAMA_CTX=4096
-uvicorn main:app --host 127.0.0.1 --port 7337
+# from project root
+python3 -m venv .venv-llama && source .venv-llama/bin/activate
+pip install --upgrade pip wheel
+pip install "llama-cpp-python==0.2.86" fastapi uvicorn pydantic sqlparse pymysql python-dotenv
+# optional: override model path (defaults to llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf)
+export LLAMA_MODEL_PATH="$(pwd)/llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+uvicorn python_api.main:app --host 127.0.0.1 --port 7337 --reload
 ```
 
 Warm the model once (first call can take 1–3 minutes):
@@ -91,6 +95,25 @@ export NLSQL_URL=http://127.0.0.1:7337
 export NLSQL_TIMEOUT_SECONDS=600   # allow long first request
 go run .
 ```
+
+3) Start Frontend (React + Vite)
+
+```
+cd ./frontend
+npm install
+npm run dev
+# open http://localhost:5173
+# Vite proxies API calls to http://localhost:8080 (see [frontend/vite.config.ts](frontend/vite.config.ts))
+```
+
+Frontend UX
+- Chat with NL input and bubbles; results table visible with executed rows.
+- Collapsible SQL block with edit & re-run.
+- Hallucination repair dropdown (invalid tables/columns get suggestions).
+- History panel (clicking an item resends the query automatically).
+- Modern toast errors when backend is down or responses are invalid.
+- Theme toggle + animated background. Key files: [frontend/src/components/ChatPanel.tsx](frontend/src/components/ChatPanel.tsx), [frontend/src/components/ui/toast.tsx](frontend/src/components/ui/toast.tsx).
+
 
 Health checks
 
@@ -164,6 +187,41 @@ curl -sS -X POST http://localhost:8080/api/v1/nl2sql/feedback \
   -H 'Content-Type: application/json' \
   -d '{"sql":"SELECT u.name, SUM(o.ammount) FROM users u JOIN orders o ON o.user_id=u.id GROUP BY u.name;","error":"Unknown column ammount in field list"}' | jq .
 ```
+
+Testing plan (users/orders DB)
+- UI (http://localhost:5173)
+  1) total order amount per user
+     - Expect: SUM(orders.amount) grouped by users; join on orders.user_id = users.id.
+  2) Orders in the last 30 days for user with email alice@example.com
+     - Expect: filter by users.email and orders.order_date range.
+  3) count of orders by status
+     - Expect: GROUP BY orders.status with counts.
+  4) Hallucination repair demo
+     - Enter a query that uses non-existent tables (e.g., orderline). UI shows suggestions (e.g., orders). Use dropdown to repair and re-run.
+  5) Backend-down handling
+     - Stop Python service and submit a query. UI shows a toast; app doesn’t crash.
+
+- cURL (Go API)
+  - Generate:
+    curl -sS -X POST http://localhost:8080/api/v1/nl2sql -H 'Content-Type: application/json' -d '{"query":"total order amount per user"}' | jq .
+  - Execute:
+    SQL=$(curl -sS -X POST http://localhost:8080/api/v1/nl2sql -H 'Content-Type: application/json' -d '{"query":"count of orders by status"}' | jq -r '.sql'); jq -nc --arg sql "$SQL" '{sql:$sql}' | curl -sS -X POST http://localhost:8080/api/v1/nl2sql/execute -H 'Content-Type: application/json' --data-binary @- | jq .
+  - Repair (hallucinated tables):
+    curl -sS -X POST http://localhost:8080/api/v1/nl2sql/repair -H 'Content-Type: application/json' -d '{"sql":"SELECT oh.order_date, ol.item_name FROM orderhead oh JOIN orderline ol ON oh.id = ol.order_id;","corrections":{"tables":{"orderhead":"orders","orderline":"orders"}}}' | jq .
+
+Local DB + schema (visibility)
+- Tables are created locally via Go models: [models/user.go](models/user.go), [models/order.go](models/order.go).
+  - users: id, name, email, phone, address, created_at, ...
+  - orders: id, user_id, order_number, amount, status, order_date, ...
+  - Relationship: orders.user_id → users.id
+- View schema JSON:
+  - All: curl -s http://127.0.0.1:7337/schema | jq .
+  - Sliced for a query: curl -s 'http://127.0.0.1:7337/schema?slice=true&q=total%20order%20amount%20per%20user' | jq .
+- Peek data directly in MySQL (example):
+  - SELECT * FROM users LIMIT 5;
+  - SELECT * FROM orders ORDER BY order_date DESC LIMIT 5;
+- You can cross-check UI results with direct SQL, e.g.:
+  - SELECT u.id, u.name, SUM(o.amount) AS total_amount FROM users u JOIN orders o ON o.user_id = u.id GROUP BY u.id, u.name ORDER BY total_amount DESC;
 
 How it works
 
