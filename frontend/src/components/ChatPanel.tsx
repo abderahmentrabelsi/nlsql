@@ -330,9 +330,14 @@ export default function ChatPanel({ showHistory = false, onCloseHistory }: { sho
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: -360, opacity: 0 }}
             transition={{ type: 'spring', duration: 0.35 }}
-            className="fixed top-28 left-0 z-50 w-[85vw] max-w-[360px] px-4 lg:hidden"
+            className="fixed top-0 left-0 z-50 w-[85vw] max-w-[360px] bg-background lg:hidden"
           >
-            <HistoryPanel items={history} onSelectSnapshot={onSelectSnapshot} onClear={clearHistory} />
+            <HistoryPanel
+              items={history}
+              onSelectSnapshot={onSelectSnapshot}
+              onClear={clearHistory}
+              variant="sidebar"
+            />
           </motion.aside>
         )}
       </AnimatePresence>
@@ -350,9 +355,14 @@ export default function ChatPanel({ showHistory = false, onCloseHistory }: { sho
 
       {/* Desktop: fixed sidebar at page left (ChatGPT-like). App wrapper shifts content via lg:ml-[340px]. */}
       {showHistory && (
-        <aside className="hidden lg:block fixed top-28 left-0 bottom-4 z-50 w-[320px]">
-          <div className="h-full overflow-y-auto pl-4 pr-2">
-            <HistoryPanel items={history} onSelectSnapshot={onSelectSnapshot} onClear={clearHistory} />
+        <aside className="hidden lg:block fixed top-0 left-0 bottom-0 z-50 w-[320px] bg-background">
+          <div className="h-full overflow-y-auto">
+            <HistoryPanel
+              items={history}
+              onSelectSnapshot={onSelectSnapshot}
+              onClear={clearHistory}
+              variant="sidebar"
+            />
           </div>
         </aside>
       )}
