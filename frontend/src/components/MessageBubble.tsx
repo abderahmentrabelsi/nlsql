@@ -19,6 +19,28 @@ export type NLSQLResponse = {
   sliced_tables?: string[];
 };
 
+function formatMs(ms?: number): string {
+  if (ms === undefined || ms === null) return '';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  const m = Math.floor(s / 60);
+  const rem = s - m * 60;
+  return `${m}m ${rem.toFixed(1)}s`;
+}
+
+function TimingMeta({ genMs, execMs, totalMs }: { genMs?: number; execMs?: number; totalMs?: number }) {
+  return (
+    <div className="text-xs text-muted-foreground">
+      {genMs != null && <span>Gen {formatMs(genMs)}</span>}
+      {genMs != null && (execMs != null || totalMs != null) && <span> • </span>}
+      {execMs != null && <span>Exec {formatMs(execMs)}</span>}
+      {(execMs != null || genMs != null) && totalMs != null && <span> • </span>}
+      {totalMs != null && <span>Total {formatMs(totalMs)}</span>}
+    </div>
+  );
+}
+
 export default function MessageBubble({
   msg,
   onRerun,
@@ -28,6 +50,17 @@ export default function MessageBubble({
   onRerun: (id: string, sql: string) => void;
   onRepair: (id: string, sql: string, corrections: any) => void;
 }) {
+  const [elapsed, setElapsed] = React.useState<number>(0);
+  React.useEffect(() => {
+    if (msg.loading && msg.startedAt) {
+      setElapsed(Date.now() - msg.startedAt);
+      const h = setInterval(() => setElapsed(Date.now() - msg.startedAt), 100);
+      return () => clearInterval(h);
+    } else {
+      setElapsed(0);
+    }
+  }, [msg.loading, msg.startedAt]);
+
   if (msg.role === 'user') {
     return (
       <div className="flex justify-end">
@@ -43,7 +76,7 @@ export default function MessageBubble({
       <div className="w-full max-w-[80%] space-y-3">
         {msg.loading && (
           <div className="rounded-2xl border bg-card px-4 py-3 flex items-center gap-3">
-            <Spinner /> <span className="text-sm text-muted-foreground">Thinking…</span>
+            <Spinner /> <span className="text-sm text-muted-foreground">Thinking… {formatMs(elapsed)}</span>
           </div>
         )}
         {msg.error && (
@@ -52,7 +85,17 @@ export default function MessageBubble({
           </div>
         )}
         {msg.exec && <ResultsTable columns={msg.exec.columns} rows={msg.exec.rows} />}
-        {msg.sql && <SQLBlock id={msg.id} sql={msg.sql} loading={msg.loading} onRerun={onRerun} />}
+        {msg.sql && (
+          <SQLBlock
+            id={msg.id}
+            sql={msg.sql}
+            loading={msg.loading}
+            onRerun={onRerun}
+            genMs={msg.genMs}
+            execMs={msg.execMs}
+            totalMs={msg.totalMs}
+          />
+        )}
         {msg.resp && !msg.resp.valid && (
           <CorrectionDropdown
             sql={msg.sql}
@@ -71,12 +114,18 @@ function SQLBlock({
   id,
   sql,
   loading,
-  onRerun
+  onRerun,
+  genMs,
+  execMs,
+  totalMs,
 }: {
   id: string;
   sql: string;
   loading?: boolean;
   onRerun: (id: string, sql: string) => void;
+  genMs?: number;
+  execMs?: number;
+  totalMs?: number;
 }) {
   const [open, setOpen] = React.useState(false);
   const [edit, setEdit] = React.useState(false);
@@ -88,7 +137,10 @@ function SQLBlock({
     <Card className="border bg-card/70">
       <CardContent className="space-y-3">
         <div className="flex items-center justify-between pt-4">
-          <div className="text-sm font-medium">Generated SQL</div>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
+            <div className="text-sm font-medium">Generated SQL</div>
+            <TimingMeta genMs={genMs} execMs={execMs} totalMs={totalMs} />
+          </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => setEdit((v) => !v)}>
               {edit ? 'Cancel' : 'Edit & Re-run'}

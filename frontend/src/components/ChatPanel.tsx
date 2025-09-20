@@ -13,6 +13,11 @@ type SystemMsg = {
   resp?: NLSQLResponse;
   loading?: boolean;
   error?: string;
+  // timing
+  startedAt?: number;   // Date.now() when request started
+  genMs?: number;       // generation/validation time
+  execMs?: number;      // execution time
+  totalMs?: number;     // total end-to-end
 };
 type ChatMsg = UserMsg | SystemMsg;
 
@@ -120,9 +125,12 @@ export default function ChatPanel() {
     setMessages((m) => [...m, { id, role: 'user', text: trimmed }]);
 
     const sysId = makeId();
-    setMessages((m) => [...m, { id: sysId, role: 'system', loading: true }]);
+    const startedAt = Date.now();
+    const tStart = performance.now();
+    setMessages((m) => [...m, { id: sysId, role: 'system', loading: true, startedAt }]);
 
     try {
+      const t0 = performance.now();
       const gen = await fetch('/api/v1/nl2sql', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -135,10 +143,13 @@ export default function ChatPanel() {
       const resp: NLSQLResponse = await gen.json().catch(() => {
         throw new Error('Invalid JSON from backend');
       });
+      const genMs = performance.now() - t0;
 
       // Auto-execute if valid
       let exec: ExecResult | undefined;
+      let execMs: number | undefined;
       if (resp?.valid && resp?.sql) {
+        const t1 = performance.now();
         const ex = await fetch('/api/v1/nl2sql/execute', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -151,13 +162,27 @@ export default function ChatPanel() {
         exec = await ex.json().catch(() => {
           throw new Error('Invalid JSON from execute');
         });
+        execMs = performance.now() - t1;
       }
+
+      const totalMs = performance.now() - tStart;
 
       // Update chat
       setMessages((m) =>
         m.map((mm) =>
           mm.id === sysId
-            ? { id: sysId, role: 'system', sql: resp?.sql, exec, resp, loading: false }
+            ? {
+                id: sysId,
+                role: 'system',
+                sql: resp?.sql,
+                exec,
+                resp,
+                loading: false,
+                startedAt,
+                genMs,
+                execMs,
+                totalMs,
+              }
             : mm
         )
       );
@@ -172,8 +197,13 @@ export default function ChatPanel() {
       };
       persistHistory(dedupeEntries([entry, ...history]));
     } catch (e: any) {
+      const totalMs = performance.now() - tStart;
       setMessages((m) =>
-        m.map((mm) => (mm.id === sysId ? { id: sysId, role: 'system', error: String(e), loading: false } : mm))
+        m.map((mm) =>
+          mm.id === sysId
+            ? { id: sysId, role: 'system', error: String(e), loading: false, startedAt, totalMs }
+            : mm
+        )
       );
       toast({
         title: 'Backend unavailable',
@@ -184,8 +214,11 @@ export default function ChatPanel() {
   };
 
   const onRerun = async (id: string, sql: string) => {
-    setMessages((m) => m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), loading: true } : mm)));
+    const startedAt = Date.now();
+    const tStart = performance.now();
+    setMessages((m) => m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), loading: true, startedAt } : mm)));
     try {
+      const t1 = performance.now();
       const ex = await fetch('/api/v1/nl2sql/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -198,9 +231,16 @@ export default function ChatPanel() {
       const exec: ExecResult = await ex.json().catch(() => {
         throw new Error('Invalid JSON from execute');
       });
-      setMessages((m) => m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), sql, exec, loading: false } : mm)));
+      const execMs = performance.now() - t1;
+      const totalMs = performance.now() - tStart;
+      setMessages((m) =>
+        m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), sql, exec, loading: false, execMs, totalMs } : mm))
+      );
     } catch (e: any) {
-      setMessages((m) => m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), loading: false, error: String(e) } : mm)));
+      const totalMs = performance.now() - tStart;
+      setMessages((m) =>
+        m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), loading: false, error: String(e), totalMs } : mm))
+      );
       toast({
         title: 'Execution failed',
         description: typeof e?.message === 'string' ? e.message : 'Start the backend and try again.',
@@ -210,8 +250,11 @@ export default function ChatPanel() {
   };
 
   const onRepair = async (id: string, sql: string, corrections: any) => {
-    setMessages((m) => m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), loading: true } : mm)));
+    const startedAt = Date.now();
+    const tStart = performance.now();
+    setMessages((m) => m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), loading: true, startedAt } : mm)));
     try {
+      const t0 = performance.now();
       const rep = await fetch('/api/v1/nl2sql/repair', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -224,9 +267,12 @@ export default function ChatPanel() {
       const resp: NLSQLResponse = await rep.json().catch(() => {
         throw new Error('Invalid JSON from repair');
       });
+      const genMs = performance.now() - t0;
 
       let exec: ExecResult | undefined;
+      let execMs: number | undefined;
       if (resp?.valid && resp?.sql) {
+        const t1 = performance.now();
         const ex = await fetch('/api/v1/nl2sql/execute', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -239,13 +285,23 @@ export default function ChatPanel() {
         exec = await ex.json().catch(() => {
           throw new Error('Invalid JSON from execute');
         });
+        execMs = performance.now() - t1;
       }
 
+      const totalMs = performance.now() - tStart;
+
       setMessages((m) =>
-        m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), sql: resp?.sql, exec, resp, loading: false } : mm))
+        m.map((mm) =>
+          mm.id === id
+            ? { ...(mm as SystemMsg), sql: resp?.sql, exec, resp, loading: false, startedAt, genMs, execMs, totalMs }
+            : mm
+        )
       );
     } catch (e: any) {
-      setMessages((m) => m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), loading: false, error: String(e) } : mm)));
+      const totalMs = performance.now() - tStart;
+      setMessages((m) =>
+        m.map((mm) => (mm.id === id ? { ...(mm as SystemMsg), loading: false, error: String(e), totalMs } : mm))
+      );
       toast({
         title: 'Repair failed',
         description: typeof e?.message === 'string' ? e.message : 'Start the backend and try again.',
