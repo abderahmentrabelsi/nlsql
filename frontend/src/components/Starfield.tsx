@@ -31,8 +31,8 @@ export default function Starfield({
   }, [count]);
 
   const bgClass = dark
-    ? 'bg-[radial-gradient(ellipse_at_center,rgba(147,51,234,0.15),rgba(0,0,0,0.9))]'
-    : 'bg-[radial-gradient(ellipse_at_center,rgba(147,51,234,0.08),rgba(255,255,255,0.9))]';
+    ? 'bg-[radial-gradient(ellipse_at_center,rgba(147,51,234,0.22),rgba(0,0,0,0.92))]'
+    : 'bg-[radial-gradient(ellipse_at_center,rgba(147,51,234,0.12),rgba(255,255,255,0.92))]';
 
   const blob1 = dark ? 'bg-fuchsia-600/15' : 'bg-fuchsia-600/10';
   const blob2 = dark ? 'bg-indigo-500/10' : 'bg-indigo-500/8';
@@ -45,7 +45,7 @@ export default function Starfield({
     : 'bg-gradient-to-r from-transparent via-fuchsia-500/40 to-transparent';
 
   return (
-    <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
+    <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
       {/* backdrop */}
       <div className={`absolute inset-0 ${bgClass}`} />
 

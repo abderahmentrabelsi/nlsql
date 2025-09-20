@@ -3,6 +3,7 @@ import QueryInput from './QueryInput';
 import MessageBubble, { ExecResult, NLSQLResponse } from './MessageBubble';
 import HistoryPanel, { type HistoryEntry } from './HistoryPanel';
 import { useToast } from './ui/toast';
+import { AnimatePresence, motion } from 'framer-motion';
 
 type UserMsg = { id: string; role: 'user'; text: string };
 type SystemMsg = {
@@ -60,7 +61,7 @@ function makeId() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-export default function ChatPanel() {
+export default function ChatPanel({ showHistory = false, onCloseHistory }: { showHistory?: boolean; onCloseHistory?: () => void }) {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
@@ -320,23 +321,60 @@ export default function ChatPanel() {
   const clearHistory = () => persistHistory([]);
 
   return (
-    <div className="grid grid-cols-12 gap-4">
-      <div className="hidden lg:block lg:col-span-3">
-        <HistoryPanel items={history} onSelectSnapshot={onSelectSnapshot} onClear={clearHistory} />
-      </div>
+    <div className="relative">
+      {/* Mobile: slide-in drawer (overlay) */}
+      <AnimatePresence>
+        {showHistory && (
+          <motion.aside
+            initial={{ x: -360, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: -360, opacity: 0 }}
+            transition={{ type: 'spring', duration: 0.35 }}
+            className="fixed top-28 left-0 z-50 w-[85vw] max-w-[360px] px-4 lg:hidden"
+          >
+            <HistoryPanel items={history} onSelectSnapshot={onSelectSnapshot} onClear={clearHistory} />
+          </motion.aside>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {showHistory && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm lg:hidden"
+            onClick={onCloseHistory}
+          />
+        )}
+      </AnimatePresence>
 
-      <div className="col-span-12 lg:col-span-9">
-        <div ref={listRef} className="rounded-2xl border bg-card/60 backdrop-blur p-4 h-[70vh] overflow-y-auto">
-          <div className="max-w-3xl mx-auto space-y-4">
-            {messages.map((m) => (
-              <MessageBubble key={m.id} msg={m as any} onRerun={onRerun} onRepair={onRepair} />
-            ))}
+      {/* Desktop: fixed sidebar at page left (ChatGPT-like). App wrapper shifts content via lg:ml-[340px]. */}
+      {showHistory && (
+        <aside className="hidden lg:block fixed top-28 left-0 bottom-4 z-50 w-[320px]">
+          <div className="h-full overflow-y-auto pl-4 pr-2">
+            <HistoryPanel items={history} onSelectSnapshot={onSelectSnapshot} onClear={clearHistory} />
+          </div>
+        </aside>
+      )}
+
+      {/* Chat column (centered). No extra grid/margins here; App.tsx adds lg:ml-[340px] when sidebar visible. */}
+      <main>
+        <div className="max-w-3xl mx-auto px-4">
+          <div
+            ref={listRef}
+            className="rounded-2xl border bg-card/60 backdrop-blur p-4 h-[70vh] overflow-y-auto"
+          >
+            <div className="space-y-4">
+              {messages.map((m) => (
+                <MessageBubble key={m.id} msg={m as any} onRerun={onRerun} onRepair={onRepair} />
+              ))}
+            </div>
+          </div>
+          <div className="mt-4">
+            <QueryInput onSend={sendNL} examples={dynamicExamples} />
           </div>
         </div>
-        <div className="mt-4">
-          <QueryInput onSend={sendNL} examples={dynamicExamples} />
-        </div>
-      </div>
+      </main>
     </div>
   );
 }

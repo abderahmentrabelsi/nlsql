@@ -29,15 +29,55 @@ function formatSecs(ms?: number): string {
 }
 
 function TimingMeta({ genMs, execMs, totalMs }: { genMs?: number; execMs?: number; totalMs?: number }) {
+  const Chip = ({ label }: { label: string }) => (
+    <span className="inline-flex items-center rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-[10px] tracking-wide">
+      {label}
+    </span>
+  );
   return (
-    <div className="text-xs text-muted-foreground">
-      {genMs != null && <span>Gen {formatSecs(genMs)}</span>}
-      {genMs != null && (execMs != null || totalMs != null) && <span> • </span>}
-      {execMs != null && <span>Exec {formatSecs(execMs)}</span>}
-      {(execMs != null || genMs != null) && totalMs != null && <span> • </span>}
-      {totalMs != null && <span>Total {formatSecs(totalMs)}</span>}
+    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      {genMs != null && <Chip label={`Gen ${formatSecs(genMs)}`} />}
+      {execMs != null && <Chip label={`Exec ${formatSecs(execMs)}`} />}
+      {totalMs != null && <Chip label={`Total ${formatSecs(totalMs)}`} />}
     </div>
   );
+}
+
+function Dots() {
+  const seq: number[] = [0.2, 1, 0.2];
+  return (
+    <span className="inline-flex items-center gap-1 ml-1 text-muted-foreground">
+      <motion.span className="h-1.5 w-1.5 rounded-full bg-current" animate={{ opacity: seq }} transition={{ duration: 0.9, repeat: Infinity }} />
+      <motion.span className="h-1.5 w-1.5 rounded-full bg-current" animate={{ opacity: seq }} transition={{ duration: 0.9, repeat: Infinity, delay: 0.15 }} />
+      <motion.span className="h-1.5 w-1.5 rounded-full bg-current" animate={{ opacity: seq }} transition={{ duration: 0.9, repeat: Infinity, delay: 0.3 }} />
+    </span>
+  );
+}
+
+/* Lightweight SQL syntax highlighter (escape then wrap keywords/strings/numbers) */
+function highlightSql(sql: string): string {
+  const escape = (s: string) =>
+    s.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>');
+  let out = escape(sql);
+
+  // strings
+  out = out.replace(/'[^']*'/g, (m) => `<span class="text-rose-300">${m}</span>`);
+  out = out.replace(/"[^"]*"/g, (m) => `<span class="text-rose-300">${m}</span>`);
+  // numbers
+  out = out.replace(/\b\d+(?:\.\d+)?\b/g, (m) => `<span class="text-amber-300">${m}</span>`);
+  // table.column
+  out = out.replace(
+    /\b([A-Za-z_][A-Za-z0-9_]*)\.(\*|[A-Za-z_][A-Za-z0-9_]*)\b/g,
+    (_m, t, c) => `<span class="text-sky-300">${t}</span>.<span class="text-teal-300">${c}</span>`
+  );
+  // keywords
+  const kws = [
+    'SELECT','FROM','JOIN','LEFT','RIGHT','FULL','INNER','OUTER','ON','WHERE','GROUP','BY','HAVING','ORDER','ASC','DESC',
+    'LIMIT','OFFSET','AS','AND','OR','NOT','IN','IS','NULL','DISTINCT','UNION','ALL','CASE','WHEN','THEN','ELSE','END','WITH'
+  ];
+  const re = new RegExp(`\\b(${kws.join('|')})\\b`, 'gi');
+  out = out.replace(re, (m) => `<span class="text-violet-300 font-semibold">${m.toUpperCase()}</span>`);
+  return out;
 }
 
 export default function MessageBubble({
@@ -62,20 +102,32 @@ export default function MessageBubble({
 
   if (msg.role === 'user') {
     return (
-      <div className="flex justify-end">
+      <motion.div
+        className="flex justify-end"
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.14 }}
+      >
         <div className="max-w-[80%] rounded-2xl bg-primary text-primary-foreground px-4 py-3 shadow-lg">
           {msg.text}
         </div>
-      </div>
+      </motion.div>
     );
   }
 
   return (
-    <div className="flex justify-start">
+    <motion.div
+      className="flex justify-start"
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.14 }}
+    >
       <div className="w-full max-w-[80%] space-y-3">
         {msg.loading && (
-          <div className="rounded-2xl border bg-card px-4 py-3 flex items-center gap-3">
-            <Spinner /> <span className="text-sm text-muted-foreground">Thinking… {formatSecs(elapsed)}</span>
+          <div className="rounded-2xl border bg-card px-4 py-3 flex items-center gap-2">
+            <Spinner />
+            <span className="text-sm text-muted-foreground">Thinking… {formatSecs(elapsed)}</span>
+            <Dots />
           </div>
         )}
         {msg.error && (
@@ -105,7 +157,7 @@ export default function MessageBubble({
           />
         )}
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -141,6 +193,9 @@ function SQLBlock({
             <TimingMeta genMs={genMs} execMs={execMs} totalMs={totalMs} />
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(value)}>
+              Copy
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setEdit((v) => !v)}>
               {edit ? 'Cancel' : 'Edit & Re-run'}
             </Button>
@@ -159,7 +214,9 @@ function SQLBlock({
               className="overflow-hidden rounded-xl border bg-background"
             >
               {!edit ? (
-                <pre className="p-3 overflow-auto"><code>{sql}</code></pre>
+                <pre className="p-3 overflow-auto">
+                  <code dangerouslySetInnerHTML={{ __html: highlightSql(sql) }} />
+                </pre>
               ) : (
                 <div className="p-3 space-y-2">
                   <Textarea rows={6} value={value} onChange={(e) => setValue(e.target.value)} />
