@@ -85,4 +85,5 @@ Dockerfile.tmp
 *.bak
 *.backup
 llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+llm-models/sqlcoder-7b-2.Q4_K_M.gguf
 /frontend/node_modules

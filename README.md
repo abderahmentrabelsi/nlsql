@@ -1,6 +1,6 @@
-# NL→SQL for ERP — Go + FastAPI + llama.cpp (Qwen GGUF)
+# NL→SQL for ERP — Go + FastAPI + llama.cpp (SQLCoder 7B v2 GGUF)
 
-Production-grade natural language to SQL pipeline built around a local Qwen 2.5 7B Instruct (GGUF) model via llama.cpp, a Python FastAPI microservice for generation/validation, and a Go API for safe SQL execution and integration.
+Production-grade natural language to SQL pipeline built around a local SQLCoder 7B v2 (GGUF, QuantFactory) model via llama.cpp, a Python FastAPI microservice for generation/validation, and a Go API for safe SQL execution and integration.
 
 Key goals
 
@@ -14,7 +14,7 @@ Architecture
 ```
  ┌──────────────────────────┐        ┌──────────────────────────────────────┐
  │        Frontend         │  NL    │                Go API                │
- │  (forms + dropdown UX)  ├────────▶  /api/v1/nl2sql/* routes             │
+ │  (chat + repair UX)     ├────────▶  /api/v1/nl2sql/* routes             │
  └──────────────────────────┘        │  routes/nl_sql_routes.go             │
                                       │  controllers/nl_sql_controller.go    │
                                       │  services/nl_sql_service.go          │
@@ -28,7 +28,8 @@ Architecture
                                       │  python_api/main.py                  │
                                       │  - Schema grounding from             │
                                       │    python_api/schema.json            │
-                                      │  - llama.cpp via Qwen GGUF           │
+                                      │  - llama.cpp via SQLCoder 7B v2      │
+                                      │  - Prompt template + n-best rerank   │
                                       │  - SQL validation + suggestions      │
                                       └───────────────────┬──────────────────┘
                                                           │
@@ -48,9 +49,10 @@ Repository layout
 - [services/nl_sql_service.go](services/nl_sql_service.go): HTTP client to Python and safe SQL execution
 - [controllers/nl_sql_controller.go](controllers/nl_sql_controller.go): NL→SQL/repair/feedback/execute endpoints
 - [routes/nl_sql_routes.go](routes/nl_sql_routes.go), [routes/routes.go](routes/routes.go): route wiring
-- [python_api/main.py](python_api/main.py): llama.cpp-backed generator + validator
-- [python_api/schema.json](python_api/schema.json): ERP schema + relationships
-- [llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf](llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf): local model
+- [python_api/main.py](python_api/main.py): llama.cpp-backed generator + validator + rerank + template
+- [python_api/schema.json](python_api/schema.json): ERP schema + relationships + synonyms (accuracy bias)
+- [python_api/prompt_template.txt](python_api/prompt_template.txt): external prompt template (optional)
+- [llm-models/sqlcoder-7b-2.Q4_K_M.gguf](llm-models/sqlcoder-7b-2.Q4_K_M.gguf): recommended local model
 - Frontend (React + Vite):
   - [frontend/vite.config.ts](frontend/vite.config.ts)
   - [frontend/src/App.tsx](frontend/src/App.tsx)
@@ -66,15 +68,23 @@ Prerequisites
 - MySQL running and reachable (for execute)
 - jq: brew install jq
 
-1) Start Python NL→SQL service
+1) Start Python NL→SQL service (SQLCoder 7B v2, QuantFactory)
 
 ```
 # from project root
 python3 -m venv .venv-llama && source .venv-llama/bin/activate
 pip install --upgrade pip wheel
-pip install "llama-cpp-python==0.2.86" fastapi uvicorn pydantic sqlparse pymysql python-dotenv
-# optional: override model path (defaults to llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf)
-export LLAMA_MODEL_PATH="$(pwd)/llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+pip install "llama-cpp-python>=0.2.86" fastapi uvicorn pydantic sqlparse pymysql python-dotenv
+
+# put the downloaded file in ./llm-models/, e.g.:
+#   llm-models/sqlcoder-7b-2.Q4_K_M.gguf   (best speed/quality on Mac)
+#   llm-models/sqlcoder-7b-2.Q5_K_M.gguf   (slightly higher quality)
+
+export LLAMA_MODEL_PATH="$(pwd)/llm-models/sqlcoder-7b-2.Q4_K_M.gguf"
+export PROMPT_TEMPLATE_PATH="$(pwd)/python_api/prompt_template.txt"
+export NLSQL_N_BEST=3
+export LLAMA_CTX=2048 LLAMA_MAX_TOKENS=128 LLAMA_THREADS=8 LLAMA_N_GPU_LAYERS=-1
+
 uvicorn python_api.main:app --host 127.0.0.1 --port 7337 --reload
 ```
 
@@ -107,12 +117,14 @@ npm run dev
 ```
 
 Frontend UX
-- Chat with NL input and bubbles; results table visible with executed rows.
-- Collapsible SQL block with edit & re-run.
+- Top search box with “NL → SQL” pill; examples inline; results/messages below.
+- Thinking timer (seconds) while generating; after completion see Gen / Exec / Total secs in the SQL card.
+- Results table; collapsible SQL with Edit & Re-run.
 - Hallucination repair dropdown (invalid tables/columns get suggestions).
 - History panel (clicking an item resends the query automatically).
 - Modern toast errors when backend is down or responses are invalid.
-- Theme toggle + animated background. Key files: [frontend/src/components/ChatPanel.tsx](frontend/src/components/ChatPanel.tsx), [frontend/src/components/ui/toast.tsx](frontend/src/components/ui/toast.tsx).
+- Theme toggle + animated background.
+Key files: [frontend/src/components/ChatPanel.tsx](frontend/src/components/ChatPanel.tsx), [frontend/src/components/MessageBubble.tsx](frontend/src/components/MessageBubble.tsx), [frontend/src/components/ui/toast.tsx](frontend/src/components/ui/toast.tsx).
 
 
 Health checks
@@ -232,14 +244,14 @@ How it works
 
 2) Schema slicing (performance)
    - Only a subset of tables likely relevant to the NL query are included (keyword scoring + relationship expansion).
-   - Max tables is configurable via SCHEMA_SLICE_MAX_TABLES (default 12).
+   - Max tables is configurable via SCHEMA_SLICE_MAX_TABLES (default 8).
 
 3) DB fallback (only when JSON is missing objects)
    - If generated SQL is invalid due to missing tables/columns not present in JSON, the service retries with live DB schema reflection automatically.
    - Controlled via SCHEMA_DB_FALLBACK (default true) and DB_* envs.
 
 4) Deterministic generation
-   - llama.cpp with Qwen 2.5 7B Instruct GGUF, temperature 0, bounded max tokens.
+   - llama.cpp with SQLCoder 7B v2 GGUF, temperature 0, bounded max tokens.
    - Prompt crafted to emit a single MySQL SELECT statement ending with a semicolon.
 
 5) Validation and suggestions
@@ -315,16 +327,26 @@ Troubleshooting
 - “Unknown column/table”: use /nl2sql/repair suggestions or feed the exact DB error to /nl2sql/feedback
 - Very slow generations: reduce LLAMA_MAX_TOKENS or LLAMA_CTX, or try a smaller quantization
 
-Roadmap (optional)
+Model choice and pros (SQLCoder 7B v2 GGUF)
 
-- Schema slicing (only the relevant subset of tables for the query)
-- Query/result caching
-- Column-level dropdown suggestions in UI
-- Richer few-shots covering aggregates/filters/joins
+- Fine-tuned for SQL: better schema faithfulness than general chat models (fewer hallucinations).
+- Strong on joins/aggregates/filters with concise prompts.
+- Q4_K_M quant fits typical Mac RAM and is fast with Metal offload.
+- Deterministic (temperature 0) + short max tokens = stable, precise outputs.
+
+Accuracy enhancements in this repo
+
+- Prompt template with rules + few-shots + optional synonyms loaded from [python_api/schema.json](python_api/schema.json).
+- Schema slicing to limit context to relevant tables.
+- n-best generation with validator rerank (NLSQL_N_BEST) to select the most schema-valid SQL.
+- Hallucination detection (tables/columns) with difflib suggestions + one-click repair.
+- Error feedback loop to fix real DB errors.
+- Deterministic decoding (temperature 0) and compact JSON prompt.
+- Frontend UX for corrections, timing, and transparency.
 
 Credits
 
-- Local model: [llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf](llm-models/Qwen2.5-7B-Instruct-Q4_K_M.gguf)
+- Local model: [llm-models/sqlcoder-7b-2.Q4_K_M.gguf](llm-models/sqlcoder-7b-2.Q4_K_M.gguf)
 - Generation/validation service: [python_api/main.py](python_api/main.py)
 - Go integration and execution: [services/nl_sql_service.go](services/nl_sql_service.go), [controllers/nl_sql_controller.go](controllers/nl_sql_controller.go), [routes/nl_sql_routes.go](routes/nl_sql_routes.go)
 

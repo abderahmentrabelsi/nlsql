@@ -9,6 +9,7 @@ from pathlib import Path
 import os
 import re
 import threading
+import random
 import pymysql
 from dotenv import load_dotenv
 
@@ -24,6 +25,7 @@ load_dotenv(str(_project_root / ".env"))
 
 MODEL_PATH = os.getenv("LLAMA_MODEL_PATH", str(_project_root / "llm-models" / "Qwen2.5-7B-Instruct-Q4_K_M.gguf"))
 SCHEMA_PATH = os.getenv("SCHEMA_PATH", str(Path(__file__).resolve().parent / "schema.json"))
+PROMPT_TEMPLATE_PATH = os.getenv("PROMPT_TEMPLATE_PATH", str(Path(__file__).resolve().parent / "prompt_template.txt"))
 # DB config for optional live schema reflection
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
@@ -34,6 +36,7 @@ SCHEMA_DB_FALLBACK = os.getenv("SCHEMA_DB_FALLBACK", "true").lower() in ("1", "t
 SCHEMA_SLICE_MAX_TABLES = int(os.getenv("SCHEMA_SLICE_MAX_TABLES", "12"))
 NLSQL_CACHE_TTL_SECONDS = int(os.getenv("NLSQL_CACHE_TTL_SECONDS", "600"))
 NLSQL_CACHE_MAX_ENTRIES = int(os.getenv("NLSQL_CACHE_MAX_ENTRIES", "512"))
+NLSQL_N_BEST = int(os.getenv("NLSQL_N_BEST", "1"))
 # in-memory NL→SQL cache: key -> (expires_at_epoch, schema_signature, response_json)
 _NL_CACHE: Dict[str, Tuple[float, str, Dict[str, Any]]] = {}
 _NL_CACHE_LOCK = threading.Lock()
@@ -60,6 +63,15 @@ def get_llm() -> Llama:
 def load_schema_from_file() -> Dict[str, Any]:
     with open(SCHEMA_PATH, "r") as f:
         return json.load(f)
+
+def load_prompt_template() -> Optional[str]:
+    try:
+        p = Path(PROMPT_TEMPLATE_PATH)
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    return None
 
 
 def load_schema_from_db() -> Dict[str, Any]:
@@ -286,6 +298,34 @@ def build_prompt(nl: str, schema: Dict[str, Any], few_shots: Optional[List[Dict[
     shots = ""
     for ex in few_shots:
         shots += f"User: {ex['nl']}\nAssistant:\n{ex['sql']}\n\n"
+
+    # optional synonyms block from schema.json -> { "synonyms": { "cost": "orders.amount", ... } }
+    synonyms_text = ""
+    syn = schema.get("synonyms")
+    if isinstance(syn, dict) and syn:
+        lines = []
+        for k, v in syn.items():
+            if isinstance(v, list):
+                vv = ", ".join(map(str, v))
+            else:
+                vv = str(v)
+            lines.append(f"{k}: {vv}")
+        synonyms_text = "\n".join(lines)
+
+    # If a prompt template file exists, use it with simple marker replacement
+    tpl = load_prompt_template()
+    if tpl:
+        rules_default = "- Use only tables and columns present in the schema.\n- Prefer explicit JOINs using relationships and FK directions.\n- Output a single MySQL SELECT ending with a semicolon.\n- No explanations, no markdown."
+        prompt = (
+            tpl.replace("{{SCHEMA}}", schema_text)
+               .replace("{{NL}}", nl)
+               .replace("{{FEWSHOTS}}", shots)
+               .replace("{{SYNONYMS}}", synonyms_text)
+               .replace("{{RULES}}", rules_default)
+        )
+        return prompt
+
+    # Fallback built-in template
     prompt = f"""You are a senior SQL engineer generating MySQL SQL. Use ONLY the provided schema and relationships. Output ONLY a single SQL query without explanations or markdown.
 
 Schema JSON:
@@ -297,6 +337,9 @@ Rules:
 - Return SELECT queries only, safe and deterministic.
 - Do not wrap SQL in code fences.
 - End with a semicolon.
+
+Synonyms (optional):
+{synonyms_text}
 
 {shots}User: {nl}
 Assistant:
@@ -328,6 +371,24 @@ def run_llm(prompt: str) -> str:
     if not sql.endswith(";"):
         sql += ";"
     return sql
+
+
+def _rotate_shots(shots: List[Dict[str, str]], k: int) -> List[Dict[str, str]]:
+    if not shots:
+        return []
+    k = k % len(shots)
+    return shots[k:] + shots[:k]
+
+
+def _pick_best(candidates: List[Tuple[str, Dict[str, Any]]]) -> Tuple[str, Dict[str, Any]]:
+    # Sort: prefer valid, then fewer invalid refs, then shorter SQL
+    def key(item: Tuple[str, Dict[str, Any]]):
+        sql, analysis = item
+        invalid_tables = len(analysis.get("invalid_tables", []))
+        invalid_cols = len(analysis.get("invalid_columns", []))
+        return (not bool(analysis.get("valid")), invalid_tables + invalid_cols, len(sql))
+    candidates_sorted = sorted(candidates, key=key)
+    return candidates_sorted[0]
 
 
 def parse_tables_and_aliases(sql: str) -> Tuple[Set[str], Dict[str, str]]:
@@ -483,8 +544,11 @@ def health():
         "status": "ok",
         "model_path": MODEL_PATH,
         "schema_path": SCHEMA_PATH,
+        "prompt_template_path": PROMPT_TEMPLATE_PATH,
+        "prompt_template_exists": Path(PROMPT_TEMPLATE_PATH).exists(),
         "db_fallback": SCHEMA_DB_FALLBACK,
         "db_name": DB_NAME,
+        "n_best": NLSQL_N_BEST,
     }
 
 
@@ -515,26 +579,36 @@ def nl2sql_endpoint(payload: NLQuery):
 
     # 2) Build with sliced JSON schema
     sliced1, selected1 = slice_schema_for_query(payload.query, base_schema)
-    prompt1 = build_prompt(payload.query, sliced1, payload.few_shots)
-    sql1 = run_llm(prompt1)
-    analysis1 = validate_sql(sql1, base_schema)
+
+    # n-best with rotated few-shots to provide slight diversity while staying deterministic
+    k = max(1, NLSQL_N_BEST)
+    base_shots = build_few_shots(base_schema)
+    candidates: List[Tuple[str, Dict[str, Any]]] = []
+    for i in range(k):
+        shots_i = _rotate_shots(base_shots, i)
+        prompt_i = build_prompt(payload.query, sliced1, shots_i)
+        sql_i = run_llm(prompt_i)
+        analysis_i = validate_sql(sql_i, base_schema)
+        candidates.append((sql_i, analysis_i))
+    sql_best, analysis_best = _pick_best(candidates)
+
     resp: Dict[str, Any] = {
-        "sql": sql1,
-        **analysis1,
+        "sql": sql_best,
+        **analysis_best,
         "schema_source": "json",
         "sliced_tables": sorted(list(selected1)),
     }
 
     # 3) Optional DB fallback only if JSON is missing objects
-    if not analysis1.get("valid") and SCHEMA_DB_FALLBACK and DB_NAME:
+    if not analysis_best.get("valid") and SCHEMA_DB_FALLBACK and DB_NAME:
         db_schema = load_schema_from_db()
         needs_retry = False
-        for t in analysis1.get("invalid_tables", []):
+        for t in analysis_best.get("invalid_tables", []):
             if t in db_schema.get("tables", {}):
                 needs_retry = True
                 break
         if not needs_retry:
-            for pair in analysis1.get("invalid_columns", []):
+            for pair in analysis_best.get("invalid_columns", []):
                 t = pair.get("table")
                 c = pair.get("column")
                 if t and t in db_schema.get("tables", {}) and c in db_schema["tables"][t]:
@@ -542,8 +616,14 @@ def nl2sql_endpoint(payload: NLQuery):
                     break
         if needs_retry:
             sliced2, selected2 = slice_schema_for_query(payload.query, db_schema)
-            sql2 = run_llm(build_prompt(payload.query, sliced2, payload.few_shots))
-            analysis2 = validate_sql(sql2, db_schema)
+            base_shots_db = build_few_shots(db_schema)
+            candidates_db: List[Tuple[str, Dict[str, Any]]] = []
+            for i in range(k):
+                shots_i = _rotate_shots(base_shots_db, i)
+                sql_i = run_llm(build_prompt(payload.query, sliced2, shots_i))
+                analysis_i = validate_sql(sql_i, db_schema)
+                candidates_db.append((sql_i, analysis_i))
+            sql2, analysis2 = _pick_best(candidates_db)
             resp = {
                 "sql": sql2,
                 **analysis2,

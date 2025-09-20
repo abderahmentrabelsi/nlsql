@@ -44,5 +44,20 @@
         "getUserByEmail": ["email"]
       }
     }
+  },
+  "synonyms": {
+    "cost": "orders.amount",
+    "total_amount": "orders.amount",
+    "invoice_total": "orders.amount",
+    "signup_date": "users.created_at",
+    "user_name": "users.name",
+    "fullname": "users.name",
+    "telephone": "users.phone",
+    "state": "orders.status",
+    "order_status": "orders.status",
+    "item_name": "orders.description",
+    "product_name": "orders.description",
+    "customer": "users",
+    "customers": "users"
   }
 }

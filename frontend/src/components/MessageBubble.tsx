@@ -19,24 +19,23 @@ export type NLSQLResponse = {
   sliced_tables?: string[];
 };
 
-function formatMs(ms?: number): string {
+function formatSecs(ms?: number): string {
   if (ms === undefined || ms === null) return '';
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)} s`;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s} s`;
   const m = Math.floor(s / 60);
-  const rem = s - m * 60;
-  return `${m}m ${rem.toFixed(1)}s`;
+  const rem = s % 60;
+  return `${m}m ${rem} s`;
 }
 
 function TimingMeta({ genMs, execMs, totalMs }: { genMs?: number; execMs?: number; totalMs?: number }) {
   return (
     <div className="text-xs text-muted-foreground">
-      {genMs != null && <span>Gen {formatMs(genMs)}</span>}
+      {genMs != null && <span>Gen {formatSecs(genMs)}</span>}
       {genMs != null && (execMs != null || totalMs != null) && <span> • </span>}
-      {execMs != null && <span>Exec {formatMs(execMs)}</span>}
+      {execMs != null && <span>Exec {formatSecs(execMs)}</span>}
       {(execMs != null || genMs != null) && totalMs != null && <span> • </span>}
-      {totalMs != null && <span>Total {formatMs(totalMs)}</span>}
+      {totalMs != null && <span>Total {formatSecs(totalMs)}</span>}
     </div>
   );
 }
@@ -54,7 +53,7 @@ export default function MessageBubble({
   React.useEffect(() => {
     if (msg.loading && msg.startedAt) {
       setElapsed(Date.now() - msg.startedAt);
-      const h = setInterval(() => setElapsed(Date.now() - msg.startedAt), 100);
+      const h = setInterval(() => setElapsed(Date.now() - msg.startedAt), 1000);
       return () => clearInterval(h);
     } else {
       setElapsed(0);
@@ -76,7 +75,7 @@ export default function MessageBubble({
       <div className="w-full max-w-[80%] space-y-3">
         {msg.loading && (
           <div className="rounded-2xl border bg-card px-4 py-3 flex items-center gap-3">
-            <Spinner /> <span className="text-sm text-muted-foreground">Thinking… {formatMs(elapsed)}</span>
+            <Spinner /> <span className="text-sm text-muted-foreground">Thinking… {formatSecs(elapsed)}</span>
           </div>
         )}
         {msg.error && (
