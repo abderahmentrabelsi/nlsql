@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -133,6 +134,83 @@ type ExecResult struct {
 	SQL     string           `json:"sql"`
 }
 
+// Simple in-memory result cache for ExecuteSelect
+type execCacheEntry struct {
+	expiresAt time.Time
+	result    *ExecResult
+}
+
+var (
+	execCache   = map[string]*execCacheEntry{}
+	execCacheMu sync.Mutex
+)
+
+func execCacheTTL() time.Duration {
+	ttl := 300
+	if v := os.Getenv("EXEC_CACHE_TTL_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ttl = n
+		}
+	}
+	return time.Duration(ttl) * time.Second
+}
+
+func execCacheMax() int {
+	max := 512
+	if v := os.Getenv("EXEC_CACHE_MAX_ENTRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			max = n
+		}
+	}
+	return max
+}
+
+func normalizeSQLKey(s string) string {
+	// trim, drop trailing semicolon, collapse whitespace
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, ";")
+	fields := strings.Fields(s)
+	return strings.Join(fields, " ")
+}
+
+func getFromExecCache(key string) *ExecResult {
+	now := time.Now()
+	execCacheMu.Lock()
+	defer execCacheMu.Unlock()
+	if e, ok := execCache[key]; ok {
+		if now.Before(e.expiresAt) {
+			return e.result
+		}
+		delete(execCache, key)
+	}
+	return nil
+}
+
+func putIntoExecCache(key string, res *ExecResult) {
+	execCacheMu.Lock()
+	defer execCacheMu.Unlock()
+	// evict oldest if above capacity
+	if len(execCache) >= execCacheMax() {
+		var oldestKey string
+		var oldestTime time.Time
+		first := true
+		for k, v := range execCache {
+			if first || v.expiresAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.expiresAt
+				first = false
+			}
+		}
+		if oldestKey != "" {
+			delete(execCache, oldestKey)
+		}
+	}
+	execCache[key] = &execCacheEntry{
+		expiresAt: time.Now().Add(execCacheTTL()),
+		result:    res,
+	}
+}
+
 func IsSelectOnly(sqlStr string) bool {
 	s := strings.TrimSpace(sqlStr)
 	// Block multiple statements
@@ -161,6 +239,12 @@ func IsSelectOnly(sqlStr string) bool {
 func ExecuteSelect(db *gorm.DB, sqlStr string) (*ExecResult, error) {
 	if !IsSelectOnly(sqlStr) {
 		return nil, errors.New("only SELECT queries are allowed")
+	}
+
+	// Try result cache first
+	key := normalizeSQLKey(sqlStr)
+	if cached := getFromExecCache(key); cached != nil {
+		return cached, nil
 	}
 
 	rows, err := db.Raw(sqlStr).Rows()
@@ -199,12 +283,15 @@ func ExecuteSelect(db *gorm.DB, sqlStr string) (*ExecResult, error) {
 		return nil, err
 	}
 
-	return &ExecResult{
+	res := &ExecResult{
 		Columns: cols,
 		Rows:    outRows,
 		Count:   len(outRows),
 		SQL:     strings.TrimSpace(sqlStr),
-	}, nil
+	}
+	// Put into cache
+	putIntoExecCache(key, res)
+	return res, nil
 }
 
 // Helper to expose *sql.DB if needed in future

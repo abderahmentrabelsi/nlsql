@@ -32,6 +32,11 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "")
 SCHEMA_DB_FALLBACK = os.getenv("SCHEMA_DB_FALLBACK", "true").lower() in ("1", "true", "yes", "y")
 SCHEMA_SLICE_MAX_TABLES = int(os.getenv("SCHEMA_SLICE_MAX_TABLES", "12"))
+NLSQL_CACHE_TTL_SECONDS = int(os.getenv("NLSQL_CACHE_TTL_SECONDS", "600"))
+NLSQL_CACHE_MAX_ENTRIES = int(os.getenv("NLSQL_CACHE_MAX_ENTRIES", "512"))
+# in-memory NL→SQL cache: key -> (expires_at_epoch, schema_signature, response_json)
+_NL_CACHE: Dict[str, Tuple[float, str, Dict[str, Any]]] = {}
+_NL_CACHE_LOCK = threading.Lock()
 
 
 def get_llm() -> Llama:
@@ -121,6 +126,56 @@ def refresh_schema(force: bool = False) -> Dict[str, Any]:
 
 def get_schema() -> Dict[str, Any]:
     return refresh_schema(False)
+
+
+def normalize_query(nl: str) -> str:
+    return " ".join(nl.lower().split())
+
+
+def schema_signature(schema: Dict[str, Any]) -> str:
+    try:
+        return str(abs(hash(json.dumps(schema, sort_keys=True))))
+    except Exception:
+        # Fallback: force a unique signature if hashing fails
+        return str(os.getpid())
+
+
+def nl_cache_get(nl_key: str, schema_sig: str) -> Optional[Dict[str, Any]]:
+    import time as _t
+    now = _t.time()
+    with _NL_CACHE_LOCK:
+        item = _NL_CACHE.get(nl_key)
+        if not item:
+            return None
+        exp, sig, resp = item
+        if sig != schema_sig or exp <= now:
+            # stale or schema changed
+            _NL_CACHE.pop(nl_key, None)
+            return None
+        return resp
+
+
+def nl_cache_set(nl_key: str, schema_sig: str, resp: Dict[str, Any]) -> None:
+    import time as _t
+    exp = _t.time() + max(1, NLSQL_CACHE_TTL_SECONDS)
+    with _NL_CACHE_LOCK:
+        # simple prune if we exceed capacity
+        if len(_NL_CACHE) >= max(1, NLSQL_CACHE_MAX_ENTRIES):
+            # drop the earliest expiring entry
+            oldest_k = None
+            oldest_exp = 0.0
+            for k, (e, _, _) in _NL_CACHE.items():
+                if oldest_k is None or e < oldest_exp:
+                    oldest_k = k
+                    oldest_exp = e
+            if oldest_k:
+                _NL_CACHE.pop(oldest_k, None)
+        _NL_CACHE[nl_key] = (exp, schema_sig, resp)
+
+
+def nl_cache_clear() -> None:
+    with _NL_CACHE_LOCK:
+        _NL_CACHE.clear()
 
 
 def tokenize_nl(nl: str) -> Set[str]:
@@ -434,6 +489,8 @@ def schema_endpoint(
     do_slice: bool = Query(False, alias="slice", description="Return sliced schema subset for the provided query"),
 ):
     base = refresh_schema(force=reload)
+    if reload:
+        nl_cache_clear()
     if do_slice and q:
         sliced, selected = slice_schema_for_query(q, base)
         return {"schema": sliced, "selected_tables": sorted(list(selected))}
@@ -442,8 +499,15 @@ def schema_endpoint(
 
 @app.post("/nl2sql")
 def nl2sql_endpoint(payload: NLQuery):
-    # 1) Always rely on JSON schema first (deterministic)
+    # 1) JSON-first with cache
     base_schema = load_schema_from_file()
+    sig = schema_signature(base_schema)
+    nl_key = normalize_query(payload.query)
+    cached = nl_cache_get(nl_key, sig)
+    if cached is not None:
+        return cached
+
+    # 2) Build with sliced JSON schema
     sliced1, selected1 = slice_schema_for_query(payload.query, base_schema)
     prompt1 = build_prompt(payload.query, sliced1, payload.few_shots)
     sql1 = run_llm(prompt1)
@@ -455,10 +519,9 @@ def nl2sql_endpoint(payload: NLQuery):
         "sliced_tables": sorted(list(selected1)),
     }
 
-    # 2) Optional DB fallback: if invalid due to new columns/tables not in JSON
+    # 3) Optional DB fallback only if JSON is missing objects
     if not analysis1.get("valid") and SCHEMA_DB_FALLBACK and DB_NAME:
         db_schema = load_schema_from_db()
-        # determine if DB adds missing tables/columns
         needs_retry = False
         for t in analysis1.get("invalid_tables", []):
             if t in db_schema.get("tables", {}):
@@ -482,6 +545,8 @@ def nl2sql_endpoint(payload: NLQuery):
                 "sliced_tables": sorted(list(selected2)),
             }
 
+    # 4) Cache final response under JSON schema signature
+    nl_cache_set(nl_key, sig, resp)
     return resp
 
 

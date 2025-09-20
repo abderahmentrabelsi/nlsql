@@ -232,7 +232,24 @@ Performance and tuning
 - Environment variables:
   - LLAMA_THREADS, LLAMA_CTX, LLAMA_MAX_TOKENS
   - NLSQL_TIMEOUT_SECONDS (Go client timeout)
+  - NLSQL_CACHE_TTL_SECONDS / NLSQL_CACHE_MAX_ENTRIES (Python NL→SQL cache)
+  - EXEC_CACHE_TTL_SECONDS / EXEC_CACHE_MAX_ENTRIES (Go DB result cache)
 - Keep few-shot examples concise to reduce latency
+
+Caching quick test
+
+- NL→SQL cache (call twice; second should be much faster)
+```
+time curl -sS -X POST http://localhost:8080/api/v1/nl2sql -H 'Content-Type: application/json' -d '{"query":"total order amount per user"}' > /dev/null
+time curl -sS -X POST http://localhost:8080/api/v1/nl2sql -H 'Content-Type: application/json' -d '{"query":"total order amount per user"}' > /dev/null
+```
+
+- DB result cache (call twice; second should be much faster)
+```
+SQL=$(curl -sS -X POST http://localhost:8080/api/v1/nl2sql -H 'Content-Type: application/json' -d '{"query":"total order amount per user"}' | jq -r '.sql')
+time jq -nc --arg sql "$SQL" '{sql:$sql}' | curl -sS -X POST http://localhost:8080/api/v1/nl2sql/execute -H 'Content-Type: application/json' --data-binary @- > /dev/null
+time jq -nc --arg sql "$SQL" '{sql:$sql}' | curl -sS -X POST http://localhost:8080/api/v1/nl2sql/execute -H 'Content-Type: application/json' --data-binary @- > /dev/null
+```
 
 Troubleshooting
 
