@@ -68,24 +68,32 @@ Prerequisites
 - MySQL running and reachable (for execute)
 - jq: brew install jq
 
-1) Start Python NL→SQL service (SQLCoder 7B v2, QuantFactory)
+1) Start Python NL→SQL (one-liner, after installing requirements)
 
+- First time only, install requirements (example):
+  - python3 -m venv .venv-llama && source .venv-llama/bin/activate && pip install -r python_api/requirements.txt
+
+- Then run the service (SQLCoder default, tuned for M1 8GB):
 ```
-# from project root
-python3 -m venv .venv-llama && source .venv-llama/bin/activate
-pip install --upgrade pip wheel
-pip install "llama-cpp-python>=0.2.86" fastapi uvicorn pydantic sqlparse pymysql python-dotenv
+source .venv-llama/bin/activate && LLAMA_MODEL_PATH="$PWD/llm-models/sqlcoder-7b-2.Q4_K_M.gguf" LLAMA_THREADS=6 LLAMA_N_GPU_LAYERS=24 LLAMA_N_BATCH=256 LLAMA_CTX=1536 LLAMA_MAX_TOKENS=128 uvicorn python_api.main:app --host 127.0.0.1 --port 7337
+```
 
-# put the downloaded file in ./llm-models/, e.g.:
-#   llm-models/sqlcoder-7b-2.Q4_K_M.gguf   (best speed/quality on Mac)
-#   llm-models/sqlcoder-7b-2.Q5_K_M.gguf   (slightly higher quality)
+Notes:
+- The code defaults to SQLCoder if LLAMA_MODEL_PATH is not set: see [MODEL_PATH default](python_api/main.py:25)
+- Adjust threads/layers/batch if needed for your Mac.
 
-export LLAMA_MODEL_PATH="$(pwd)/llm-models/sqlcoder-7b-2.Q4_K_M.gguf"
-export PROMPT_TEMPLATE_PATH="$(pwd)/python_api/prompt_template.txt"
-export NLSQL_N_BEST=3
-export LLAMA_CTX=2048 LLAMA_MAX_TOKENS=128 LLAMA_THREADS=8 LLAMA_N_GPU_LAYERS=-1
+Or, if you already set these envs once in a .env at project root (loaded by [python_api/main.py](python_api/main.py)):
+- LLAMA_MODEL_PATH=./llm-models/sqlcoder-7b-2.Q4_K_M.gguf
+- PROMPT_TEMPLATE_PATH=./python_api/prompt_template.txt
+- NLSQL_N_BEST=3
+- LLAMA_CTX=2048
+- LLAMA_MAX_TOKENS=128
+- LLAMA_THREADS=8
+- LLAMA_N_GPU_LAYERS=-1
 
-uvicorn python_api.main:app --host 127.0.0.1 --port 7337 --reload
+Then you can start with a single command (no re-exports needed):
+```
+source .venv-llama/bin/activate && uvicorn python_api.main:app --host 127.0.0.1 --port 7337 --reload
 ```
 
 Warm the model once (first call can take 1–3 minutes):

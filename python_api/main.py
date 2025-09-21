@@ -23,7 +23,7 @@ _project_root = Path(__file__).resolve().parents[1]
 # Load environment from project root .env if available (for DB_* and toggles)
 load_dotenv(str(_project_root / ".env"))
 
-MODEL_PATH = os.getenv("LLAMA_MODEL_PATH", str(_project_root / "llm-models" / "Qwen2.5-7B-Instruct-Q4_K_M.gguf"))
+MODEL_PATH = os.getenv("LLAMA_MODEL_PATH", str(_project_root / "llm-models" / "sqlcoder-7b-2.Q4_K_M.gguf"))
 SCHEMA_PATH = os.getenv("SCHEMA_PATH", str(Path(__file__).resolve().parent / "schema.json"))
 PROMPT_TEMPLATE_PATH = os.getenv("PROMPT_TEMPLATE_PATH", str(Path(__file__).resolve().parent / "prompt_template.txt"))
 # DB config for optional live schema reflection
