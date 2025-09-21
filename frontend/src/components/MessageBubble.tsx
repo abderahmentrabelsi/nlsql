@@ -22,15 +22,15 @@ export type NLSQLResponse = {
 function formatSecs(ms?: number): string {
   if (ms === undefined || ms === null) return '';
   const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s} s`;
+  if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   const rem = s % 60;
-  return `${m}m ${rem} s`;
+  return `${m}m ${rem}s`;
 }
 
 function TimingMeta({ genMs, execMs, totalMs }: { genMs?: number; execMs?: number; totalMs?: number }) {
   const Chip = ({ label }: { label: string }) => (
-    <span className="inline-flex items-center rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-[10px] tracking-wide">
+    <span className="inline-flex items-center rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-[10px] tracking-wide whitespace-nowrap leading-none">
       {label}
     </span>
   );
