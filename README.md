@@ -82,6 +82,13 @@ Notes:
 - The code defaults to SQLCoder if LLAMA_MODEL_PATH is not set: see [MODEL_PATH default](python_api/main.py:25)
 - Adjust threads/layers/batch if needed for your Mac.
 
+Warm‑up and health
+- The service pre‑warms the model at startup so the first request is fast. While warming, the API may respond with a fast 503 warming_up instead of hanging.
+- Check readiness:
+  curl -s http://127.0.0.1:7337/health | jq '{model:.model_path,warm:.warm,warm_error:.warm_error}'
+  When "warm": true, the model is ready.
+- If you see warming_up, retry after a second; this avoids long frontend timeouts.
+
 Or, if you already set these envs once in a .env at project root (loaded by [python_api/main.py](python_api/main.py)):
 - LLAMA_MODEL_PATH=./llm-models/sqlcoder-7b-2.Q4_K_M.gguf
 - PROMPT_TEMPLATE_PATH=./python_api/prompt_template.txt

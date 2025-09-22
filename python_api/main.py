@@ -41,6 +41,10 @@ NLSQL_N_BEST = int(os.getenv("NLSQL_N_BEST", "1"))
 _NL_CACHE: Dict[str, Tuple[float, str, Dict[str, Any]]] = {}
 _NL_CACHE_LOCK = threading.Lock()
 
+# Warm-up state to avoid first-request cold start timeouts
+_is_warm: bool = False
+_warm_error: Optional[str] = None
+
 
 def get_llm() -> Llama:
     global _llm_instance
@@ -63,6 +67,25 @@ def get_llm() -> Llama:
 def load_schema_from_file() -> Dict[str, Any]:
     with open(SCHEMA_PATH, "r") as f:
         return json.load(f)
+
+def _warm_up_llm() -> None:
+    """Preload model and run a 1-token decode to initialize Metal/CPU kernels."""
+    global _is_warm, _warm_error
+    try:
+        llm = get_llm()
+        # 1 token warmup to compile kernels and allocate buffers
+        llm(" ", max_tokens=1, temperature=0.0, top_p=1.0, stop=["\n"], echo=False)
+        _is_warm = True
+        _warm_error = None
+    except Exception as e:
+        _warm_error = str(e)
+        _is_warm = False
+
+@app.on_event("startup")
+def _startup_warm():
+    # Warm up in background so the server is responsive immediately
+    th = threading.Thread(target=_warm_up_llm, daemon=True)
+    th.start()
 
 def load_prompt_template() -> Optional[str]:
     try:
@@ -549,6 +572,8 @@ def health():
         "db_fallback": SCHEMA_DB_FALLBACK,
         "db_name": DB_NAME,
         "n_best": NLSQL_N_BEST,
+        "warm": _is_warm,
+        "warm_error": _warm_error,
     }
 
 
@@ -569,6 +594,10 @@ def schema_endpoint(
 
 @app.post("/nl2sql")
 def nl2sql_endpoint(payload: NLQuery):
+    # If model is still warming, fail fast to avoid long frontend timeouts
+    if not _is_warm:
+        return {"error": "warming_up", "detail": "Model is warming up, retry shortly."}, 503
+
     # 1) JSON-first with cache
     base_schema = load_schema_from_file()
     sig = schema_signature(base_schema)
