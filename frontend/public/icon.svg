@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(256 256) rotate(90) scale(256)">
+      <stop offset="0" stop-color="#1f1236"/>
+      <stop offset="1" stop-color="#0b0f1a"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C084FC"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <linearGradient id="sgrad" x1="120" y1="80" x2="392" y2="432" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A78BFA"/>
+      <stop offset="0.5" stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <linearGradient id="node" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#A78BFA"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="innerGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="b2"/>
+      <feMerge>
+        <feMergeNode in="b2"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- Neon ring -->
+  <circle cx="256" cy="256" r="204" stroke="url(#ring)" stroke-width="26" fill="none" opacity="0.9" filter="url(#glow)"/>
+  <circle cx="256" cy="256" r="204" stroke="#ffffff10" stroke-width="2" fill="none"/>
+
+  <!-- Stylized S (SQLCoder) -->
+  <path d="M350 176c-22-38-69-52-113-44-28 5-56 17-75 35" stroke="url(#sgrad)" stroke-width="38" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+  <path d="M162 336c22 38 69 52 113 44 28-5 56-17 75-35" stroke="url(#sgrad)" stroke-width="38" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+
+  <!-- AI nodes -->
+  <circle cx="168" cy="180" r="10" fill="url(#node)" filter="url(#innerGlow)"/>
+  <circle cx="344" cy="332" r="10" fill="url(#node)" filter="url(#innerGlow)"/>
+  <circle cx="196" cy="332" r="8" fill="url(#node)" filter="url(#innerGlow)"/>
+  <circle cx="316" cy="180" r="8" fill="url(#node)" filter="url(#innerGlow)"/>
+  <path d="M168 180 L196 332" stroke="url(#node)" stroke-width="3" stroke-linecap="round" opacity="0.8"/>
+  <path d="M316 180 L344 332" stroke="url(#node)" stroke-width="3" stroke-linecap="round" opacity="0.8"/>
+  <path d="M196 332 C230 310 282 308 316 180" stroke="url(#node)" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- Angle brackets hinting SQL -->
+  <path d="M116 256 l48 -36 -48 -36" stroke="url(#sgrad)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+  <path d="M396 256 l-48 36 48 36" stroke="url(#sgrad)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+</svg>
