@@ -2,6 +2,10 @@
 
 Production-grade natural language to SQL pipeline built around a local SQLCoder 7B v2 (GGUF, QuantFactory) model via llama.cpp, a Python FastAPI microservice for generation/validation, and a Go API for safe SQL execution and integration.
 
+## UI Screenshot
+
+![SQLCoder Studio UI](frontend/public/image.png)
+
 Key goals
 
 - High precision and accuracy on ERP-style queries
