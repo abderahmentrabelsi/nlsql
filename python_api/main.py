@@ -31,7 +31,7 @@ DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_USER = os.getenv("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_NAME = os.getenv("DB_NAME", "")
+DB_NAME = os.getenv("DB_NAME", "cetecerp")
 SCHEMA_DB_FALLBACK = os.getenv("SCHEMA_DB_FALLBACK", "true").lower() in ("1", "true", "yes", "y")
 SCHEMA_SLICE_MAX_TABLES = int(os.getenv("SCHEMA_SLICE_MAX_TABLES", "12"))
 NLSQL_CACHE_TTL_SECONDS = int(os.getenv("NLSQL_CACHE_TTL_SECONDS", "600"))
@@ -260,7 +260,7 @@ def slice_schema_for_query(nl: str, schema: Dict[str, Any]) -> Tuple[Dict[str, A
         selected.append(t)
     # if nothing matched, pick a small default slice
     if not selected:
-        defaults = [t for t in ("users", "orders") if t in tables_def]
+        defaults = [t for t in ("ordhead", "ordline", "customers") if t in tables_def]
         selected = defaults or list(tables_def.keys())[: min(SCHEMA_SLICE_MAX_TABLES, len(tables_def))]
     # expand with neighbors via relationships (to enable joins)
     sel_set: Set[str] = set(selected)
@@ -298,17 +298,44 @@ class FeedbackRequest(BaseModel):
 
 def build_few_shots(schema: Dict[str, Any]) -> List[Dict[str, str]]:
     examples: List[Dict[str, str]] = []
+    # 1) Sales by customer (ordhead ↔ customers)
     examples.append({
-        "nl": "List total order amount per user",
-        "sql": "SELECT u.id, u.name, SUM(o.amount) AS total_amount FROM users u JOIN orders o ON o.user_id = u.id GROUP BY u.id, u.name ORDER BY total_amount DESC;"
+        "nl": "Top 10 customers by invoice total in the last 30 days",
+        "sql": "SELECT c.id, c.custnum, c.name, SUM(o.invoice_total) AS total_invoice "
+               "FROM ordhead o "
+               "LEFT JOIN customers c ON c.id = o.customer_id "
+               "WHERE o.oorderdate >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY) "
+               "GROUP BY c.id, c.custnum, c.name "
+               "ORDER BY total_invoice DESC "
+               "LIMIT 10;"
     })
+    # 2) Open orders by status
     examples.append({
-        "nl": "Orders in the last 30 days for user with email alice@example.com",
-        "sql": "SELECT o.id, o.order_number, o.amount, o.status, o.order_date FROM orders o JOIN users u ON u.id = o.user_id WHERE u.email = 'alice@example.com' AND o.order_date >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY) ORDER BY o.order_date DESC;"
+        "nl": "Count of open orders by status code",
+        "sql": "SELECT o.orderstatus AS status, COUNT(*) AS cnt "
+               "FROM ordhead o "
+               "WHERE o.deleted_flag = 0 "
+               "GROUP BY o.orderstatus "
+               "ORDER BY cnt DESC;"
     })
+    # 3) Order lines for a specific order number
     examples.append({
-        "nl": "Count of orders by status",
-        "sql": "SELECT status, COUNT(*) AS cnt FROM orders GROUP BY status ORDER BY cnt DESC;"
+        "nl": "List the lines for order number 100234 with part and quantities",
+        "sql": "SELECT l.id, l.ordernum, l.lineitem, l.prcpart, l.oorderqty, l.shipqty, l.status "
+               "FROM ordline l "
+               "WHERE l.ordernum = '100234' "
+               "ORDER BY l.lineitem;"
+    })
+    # 4) PO spend by vendor (pos ↔ vendors)
+    examples.append({
+        "nl": "Total PO spend by vendor over the last 90 days",
+        "sql": "SELECT v.id, v.vennum, v.name, SUM(pl.unit_cost * COALESCE(pl.orderqty, 0)) AS total_spend "
+               "FROM pos p "
+               "JOIN po_lines pl ON pl.po_id = p.id "
+               "LEFT JOIN vendors v ON v.id = p.vendor_id "
+               "WHERE p.enterdate >= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY) "
+               "GROUP BY v.id, v.vennum, v.name "
+               "ORDER BY total_spend DESC;"
     })
     return examples
 
@@ -333,6 +360,9 @@ def build_prompt(nl: str, schema: Dict[str, Any], few_shots: Optional[List[Dict[
             else:
                 vv = str(v)
             lines.append(f"{k}: {vv}")
+        syn_limit = int(os.getenv("PROMPT_SYNONYMS_MAX", "12"))
+        if syn_limit > 0:
+            lines = lines[:syn_limit]
         synonyms_text = "\n".join(lines)
 
     # If a prompt template file exists, use it with simple marker replacement
@@ -611,12 +641,24 @@ def nl2sql_endpoint(payload: NLQuery):
 
     # n-best with rotated few-shots to provide slight diversity while staying deterministic
     k = max(1, NLSQL_N_BEST)
-    base_shots = build_few_shots(base_schema)
+    base_shots = build_few_shots(base_schema)[:max(0, int(os.getenv("FEW_SHOT_MAX", "2")))]
     candidates: List[Tuple[str, Dict[str, Any]]] = []
     for i in range(k):
         shots_i = _rotate_shots(base_shots, i)
         prompt_i = build_prompt(payload.query, sliced1, shots_i)
-        sql_i = run_llm(prompt_i)
+        try:
+            sql_i = run_llm(prompt_i)
+        except ValueError as e:
+            if "context window" in str(e).lower():
+                tiny_tables = dict(list(sliced1.get("tables", {}).items())[:6])
+                tiny_schema = {"tables": tiny_tables, "relationships": []}
+                try:
+                    # reduce few-shots aggressively
+                    sql_i = run_llm(build_prompt(payload.query, tiny_schema, shots_i[:1]))
+                except Exception:
+                    return JSONResponse({"error": "prompt_too_large", "detail": "Prompt exceeds context; try a narrower question"}, status_code=413)
+            else:
+                return JSONResponse({"error": "llm_error", "detail": str(e)}, status_code=500)
         analysis_i = validate_sql(sql_i, base_schema)
         candidates.append((sql_i, analysis_i))
     sql_best, analysis_best = _pick_best(candidates)

@@ -23,11 +23,11 @@ type SystemMsg = {
 type ChatMsg = UserMsg | SystemMsg;
 
 const DEFAULT_EXAMPLES = [
-  'total order amount per user',
-  'sum cost per user',
-  'list orders last 7 days for alice@example.com',
-  'count of orders by status',
-  'top 5 users by total amount',
+  'top 10 customers by invoice total in the last 30 days',
+  'list order lines for order number SO-1001',
+  'total PO spend by vendor over the last 90 days',
+  'quotes created in the last 30 days',
+  'parts ordered on PO in the next 14 days',
 ];
 
 const HISTORY_KEY = 'nlsql_history_v2';

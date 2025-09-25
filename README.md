@@ -363,6 +363,56 @@ Accuracy enhancements in this repo
 - Deterministic decoding (temperature 0) and compact JSON prompt.
 - Frontend UX for corrections, timing, and transparency.
 
+Using your own ERP schema (import and go)
+
+Follow this when you already have a populated ERP DB (e.g., cetecerp) and want NL→SQL to target it:
+
+1) Import or verify the schema/data
+   - If you have a dump: use your preferred tool (e.g., MySQL client or VSCode SQLTools) to import your .sql into a new database (e.g., cetecerp).
+   - Confirm data is present:
+     - SELECT COUNT(*) FROM customers;
+     - SELECT COUNT(*) FROM ordhead;
+     - SELECT COUNT(*) FROM ordline;
+
+2) Point both services to that DB
+   - In your .env at project root (template: [.env.example](.env.example:1)):
+     - DB_HOST=...
+     - DB_PORT=3306
+     - DB_USER=...
+     - DB_PASSWORD=...
+     - DB_NAME=cetecerp
+     - AUTO_MIGRATE=false        # don’t auto-create local sample tables on external ERP
+     - SCHEMA_DB_FALLBACK=true   # enables live DB reflection if JSON is incomplete
+   - Defaults are also coded in:
+     - Go DSN default to cetecerp in [config/database.go](config/database.go:29)
+     - Python DB default to cetecerp in [python_api/main.py](python_api/main.py:30)
+
+3) Start the stack
+   - Python (keeps warmup enabled by default): see [README warm‑up](README.md:89)
+   - Go: go run .
+   - Frontend: npm run dev
+
+4) Tune grounding for best accuracy (optional)
+   - JSON schema and synonyms: [python_api/schema.json](python_api/schema.json). Add business synonyms (e.g., “SO”→ordhead.ordernum, “PO”→pos.ponum) to reduce ambiguity.
+   - Few‑shot examples are ERP‑oriented in [python_api/main.py](python_api/main.py:299).
+   - Increase slice breadth for larger joins: SCHEMA_SLICE_MAX_TABLES=12 in .env.
+
+5) Runtime checks
+   - Python health: curl -s http://127.0.0.1:7337/health | jq .
+   - Force schema reload after import: curl -s "http://127.0.0.1:7337/schema?reload=true" | jq .
+
+ERP example prompts (frontend)
+
+The default suggestions are tuned to ERP tables. Try:
+- top 10 customers by invoice total in the last 30 days
+- count of open orders by status code
+- list order lines for order number SO-1001
+- total PO spend by vendor over the last 90 days
+- quotes created in the last 30 days
+- parts ordered on PO in the next 14 days
+
+These appear in the app’s input helper (updated here: [frontend/src/components/ChatPanel.tsx](frontend/src/components/ChatPanel.tsx:25)).
+
 Credits
 
 - Local model: [llm-models/sqlcoder-7b-2.Q4_K_M.gguf](llm-models/sqlcoder-7b-2.Q4_K_M.gguf)
