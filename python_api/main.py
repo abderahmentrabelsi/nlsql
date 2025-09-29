@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any, Tuple, Set
 from llama_cpp import Llama
@@ -34,6 +35,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "cetecerp")
 SCHEMA_DB_FALLBACK = os.getenv("SCHEMA_DB_FALLBACK", "true").lower() in ("1", "true", "yes", "y")
 SCHEMA_SLICE_MAX_TABLES = int(os.getenv("SCHEMA_SLICE_MAX_TABLES", "12"))
+SCHEMA_SLICE_MAX_COLS = int(os.getenv("SCHEMA_SLICE_MAX_COLS", "48"))
 NLSQL_CACHE_TTL_SECONDS = int(os.getenv("NLSQL_CACHE_TTL_SECONDS", "600"))
 NLSQL_CACHE_MAX_ENTRIES = int(os.getenv("NLSQL_CACHE_MAX_ENTRIES", "512"))
 NLSQL_N_BEST = int(os.getenv("NLSQL_N_BEST", "1"))
@@ -233,7 +235,9 @@ def slice_schema_for_query(nl: str, schema: Dict[str, Any]) -> Tuple[Dict[str, A
     tokens = tokenize_nl(nl)
     tables_def: Dict[str, List[str]] = schema.get("tables", {})
     rels: List[Dict[str, str]] = schema.get("relationships", [])
+    synonyms: Dict[str, Any] = schema.get("synonyms", {}) or {}
     scores: Dict[str, int] = {}
+
     for t, cols in tables_def.items():
         t_low = t.lower()
         score = 0
@@ -252,6 +256,21 @@ def slice_schema_for_query(nl: str, schema: Dict[str, Any]) -> Tuple[Dict[str, A
                         score += 1
         if score > 0:
             scores[t] = score
+
+    # Boost tables via synonyms (e.g., "orders" -> "ordhead")
+    def _target_table(v: Any) -> Optional[str]:
+        if isinstance(v, str):
+            return v.split(".", 1)[0]
+        if isinstance(v, list) and v:
+            return str(v[0]).split(".", 1)[0]
+        return None
+
+    for tok in tokens:
+        if tok in synonyms:
+            tbl = _target_table(synonyms[tok])
+            if tbl and tbl in tables_def:
+                scores[tbl] = scores.get(tbl, 0) + 15
+
     # choose top tables by score
     selected: List[str] = []
     for t, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True):
@@ -272,9 +291,33 @@ def slice_schema_for_query(nl: str, schema: Dict[str, Any]) -> Tuple[Dict[str, A
         if r.get("to_table") in sel_set and r.get("from_table") not in sel_set:
             sel_set.add(r.get("from_table"))
     # build sliced schema
-    sliced_tables = {t: tables_def[t] for t in sel_set if t in tables_def}
+    # Trim columns per table to keep prompt small (prefer token-matching columns first)
+    def _trim_cols(t: str, cols: List[str], tokens: Set[str], limit: int) -> List[str]:
+        if limit <= 0 or len(cols) <= limit:
+            return cols
+        scored = []
+        for c in cols:
+            score = 0
+            cl = c.lower()
+            if cl in tokens:
+                score += 5
+            for tok in tokens:
+                if tok and tok in cl:
+                    score += 1
+            scored.append((score, c))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        picked = [c for _, c in scored[:limit]]
+        # keep original order for the picked subset
+        order = {c: i for i, c in enumerate(picked)}
+        return sorted(picked, key=lambda c: order[c])
+
+    trimmed_tables: Dict[str, List[str]] = {}
+    for t in sel_set:
+        if t in tables_def:
+            trimmed_tables[t] = _trim_cols(t, tables_def[t], tokens, SCHEMA_SLICE_MAX_COLS)
+
     sliced_rels = [r for r in rels if r.get("from_table") in sel_set and r.get("to_table") in sel_set]
-    sliced: Dict[str, Any] = {"tables": sliced_tables, "relationships": sliced_rels}
+    sliced: Dict[str, Any] = {"tables": trimmed_tables, "relationships": sliced_rels}
     # include services if present (unchanged; optional)
     if "services" in schema:
         sliced["services"] = schema["services"]
@@ -360,7 +403,7 @@ def build_prompt(nl: str, schema: Dict[str, Any], few_shots: Optional[List[Dict[
             else:
                 vv = str(v)
             lines.append(f"{k}: {vv}")
-        syn_limit = int(os.getenv("PROMPT_SYNONYMS_MAX", "12"))
+        syn_limit = int(os.getenv("PROMPT_SYNONYMS_MAX", "8"))
         if syn_limit > 0:
             lines = lines[:syn_limit]
         synonyms_text = "\n".join(lines)
@@ -368,7 +411,7 @@ def build_prompt(nl: str, schema: Dict[str, Any], few_shots: Optional[List[Dict[
     # If a prompt template file exists, use it with simple marker replacement
     tpl = load_prompt_template()
     if tpl:
-        rules_default = "- Use only tables and columns present in the schema.\n- Prefer explicit JOINs using relationships and FK directions.\n- Output a single MySQL SELECT ending with a semicolon.\n- No explanations, no markdown."
+        rules_default = "- Use only tables and columns present in the schema.\n- Prefer explicit JOINs using relationships and FK directions.\n- MySQL 8.0 syntax only: use DATE_ADD(CURRENT_DATE, INTERVAL 1 MONTH); do not use NULLS LAST/FIRST; for nulls last use ORDER BY col IS NULL, col.\n- Output a single MySQL SELECT ending with a semicolon.\n- No explanations, no markdown."
         prompt = (
             tpl.replace("{{SCHEMA}}", schema_text)
                .replace("{{NL}}", nl)
@@ -387,6 +430,7 @@ Schema JSON:
 Rules:
 - Use only tables and columns that exist in the schema.
 - Prefer explicit JOINs using relationships.
+- MySQL 8.0 syntax only: use DATE_ADD(CURRENT_DATE, INTERVAL 1 MONTH); do not use NULLS LAST/FIRST; for nulls last use ORDER BY col IS NULL, col.
 - Return SELECT queries only, safe and deterministic.
 - Do not wrap SQL in code fences.
 - End with a semicolon.
@@ -525,10 +569,146 @@ def parse_columns(sql: str, alias_to_table: Dict[str, str]) -> List[Tuple[Option
     return norm
 
 
+
+
+def postprocess_sql(nl: str, sql: str, schema: Dict[str, Any]) -> str:
+    """
+    Fix common trivial issues after generation:
+    - Trailing 'WHERE;' with no predicate → add best-effort predicate from NL digits and common columns
+    - Remove non-MySQL constructs (NULLS LAST/FIRST, quoted INTERVAL)
+    - Ensure single trailing semicolon
+    """
+    try:
+        s = sql
+
+        # 1) Dialect fixes: quoted INTERVAL -> MySQL style
+        #    e.g., INTERVAL '1 month' -> INTERVAL 1 MONTH
+        def _interval_fix(m):
+            num = m.group(1)
+            unit = m.group(2).upper()
+            return f"INTERVAL {num} {unit}"
+        s = re.sub(r"(?i)INTERVAL\s+'(\d+)'\s+([A-Za-z]+)", _interval_fix, s)
+
+        # DATE_ADD(CURRENT_DATE, INTERVAL '1 month') -> DATE_ADD(CURRENT_DATE, INTERVAL 1 MONTH)
+        def _date_add_fix(m):
+            base = m.group(1)
+            num = m.group(2)
+            unit = m.group(3).upper()
+            return f"DATE_ADD({base}, INTERVAL {num} {unit})"
+        s = re.sub(r"(?is)DATE_ADD\(\s*(CURRENT_DATE|CURDATE\(\)|NOW\(\))\s*,\s*INTERVAL\s+'(\d+)'\s+([A-Za-z]+)\s*\)", _date_add_fix, s)
+
+        # 2) Replace NULLS LAST/FIRST (single-expression order-by)
+        def _nulls_last_fix(m):
+            expr = m.group(1).strip()
+            direction = (m.group(2) or "").strip()
+            dir_txt = f" {direction}" if direction else ""
+            return f"ORDER BY {expr} IS NULL, {expr}{dir_txt}"
+        s = re.sub(r"(?is)ORDER\s+BY\s+([`\"A-Za-z0-9_\.\(\)]+)\s*(ASC|DESC)?\s+NULLS\s+LAST\b", _nulls_last_fix, s)
+
+        def _nulls_first_fix(m):
+            expr = m.group(1).strip()
+            direction = (m.group(2) or "").strip()
+            dir_txt = f" {direction}" if direction else ""
+            return f"ORDER BY {expr} IS NOT NULL, {expr}{dir_txt}"
+        s = re.sub(r"(?is)ORDER\s+BY\s+([`\"A-Za-z0-9_\.\(\)]+)\s*(ASC|DESC)?\s+NULLS\s+FIRST\b", _nulls_first_fix, s)
+
+        # 3) Fix bare WHERE;
+        if re.search(r"(?is)\bwhere\s*;\s*$", s):
+            nums = re.findall(r"\b\d+\b", nl)
+            num = nums[-1] if nums else None
+            used_tables, alias_map = parse_tables_and_aliases(s)
+            tables_def: Dict[str, List[str]] = schema.get("tables", {}) or {}
+
+            # Choose a likely table
+            prefer = ["ordhead", "ordline", "customers", "pos", "quotes"]
+            chosen_table = None
+            for t in prefer:
+                if t in used_tables:
+                    chosen_table = t
+                    break
+            if not chosen_table:
+                for t in used_tables:
+                    if t in tables_def:
+                        chosen_table = t
+                        break
+
+            # Choose a likely column present in schema
+            col_pref = {
+                "ordhead": ["custnum", "ordernum", "id"],
+                "ordline": ["ordernum", "id"],
+                "customers": ["custnum", "id"],
+                "pos": ["ponum", "id"],
+                "quotes": ["id"],
+            }
+            chosen_col = None
+            if chosen_table:
+                for c in col_pref.get(chosen_table, ["id"]):
+                    if c in tables_def.get(chosen_table, []):
+                        chosen_col = c
+                        break
+
+            # Prefer alias for the chosen table if present
+            qualifier = chosen_table or ""
+            if chosen_table:
+                for a, base in alias_map.items():
+                    if base == chosen_table:
+                        qualifier = a
+                        break
+
+            if chosen_col:
+                pred = f"{qualifier}.{chosen_col} = {num}" if num is not None else f"{qualifier}.{chosen_col} IS NOT NULL"
+            else:
+                pred = "1=1"
+
+            s = re.sub(r"(?is)\bwhere\s*;\s*$", f"WHERE {pred};", s)
+
+        # 4) Fix 'WHERE AND;' or 'WHERE OR;'
+        s = re.sub(r"(?is)\bwhere\s*(?:and|or)\s*;\s*$", "WHERE 1=1;", s)
+
+        # 5) Ensure trailing semicolon
+        if not s.strip().endswith(";"):
+            s = s.strip() + ";"
+
+        return s
+    except Exception:
+        # Keep original SQL on any error
+        return sql
+
+
 def validate_sql(sql: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     tables_def: Dict[str, List[str]] = schema.get("tables", {})
     all_tables = set(tables_def.keys())
-    used_tables, alias_map = parse_tables_and_aliases(sql)
+
+    # Build synonym map (lowercase) for table canonicalization
+    syn = schema.get("synonyms", {}) or {}
+    name_map: Dict[str, str] = {}
+    for k, v in syn.items():
+        kk = str(k).lower()
+        if isinstance(v, str):
+            tbl = v.split(".", 1)[0]
+            if tbl in tables_def:
+                name_map[kk] = tbl
+        elif isinstance(v, list):
+            for vv in v:
+                tbl = str(vv).split(".", 1)[0]
+                if tbl in tables_def:
+                    name_map[kk] = tbl
+                    break
+
+    used_tables_raw, alias_map_raw = parse_tables_and_aliases(sql)
+
+    # Canonicalize aliases and used tables using synonyms
+    alias_map: Dict[str, str] = {}
+    for a, t in alias_map_raw.items():
+        t_low = t.lower()
+        canon = name_map.get(t_low, t)
+        alias_map[a] = canon
+
+    used_tables: Set[str] = set()
+    for t in used_tables_raw:
+        t_low = t.lower()
+        used_tables.add(name_map.get(t_low, t))
+
     invalid_tables = sorted([t for t in used_tables if t not in all_tables])
 
     column_refs = parse_columns(sql, alias_map)
@@ -536,6 +716,9 @@ def validate_sql(sql: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     for qual, col in column_refs:
         if qual:
             base = qual
+            # Canonicalize base if needed
+            if base not in tables_def and base.lower() in name_map:
+                base = name_map[base.lower()]
             if base not in tables_def:
                 invalid_columns.append({"table": base, "column": col})
             else:
@@ -641,16 +824,19 @@ def nl2sql_endpoint(payload: NLQuery):
 
     # n-best with rotated few-shots to provide slight diversity while staying deterministic
     k = max(1, NLSQL_N_BEST)
-    base_shots = build_few_shots(base_schema)[:max(0, int(os.getenv("FEW_SHOT_MAX", "2")))]
+    base_shots = build_few_shots(base_schema)[:max(0, int(os.getenv("FEW_SHOT_MAX", "1")))]
     candidates: List[Tuple[str, Dict[str, Any]]] = []
     for i in range(k):
         shots_i = _rotate_shots(base_shots, i)
         prompt_i = build_prompt(payload.query, sliced1, shots_i)
         try:
             sql_i = run_llm(prompt_i)
+            sql_i = postprocess_sql(payload.query, sql_i, base_schema)
         except ValueError as e:
             if "context window" in str(e).lower():
                 tiny_tables = dict(list(sliced1.get("tables", {}).items())[:6])
+                # also trim columns aggressively to fit context
+                tiny_tables = {t: (cols[:24] if isinstance(cols, list) else cols) for t, cols in tiny_tables.items()}
                 tiny_schema = {"tables": tiny_tables, "relationships": []}
                 try:
                     # reduce few-shots aggressively
@@ -691,7 +877,17 @@ def nl2sql_endpoint(payload: NLQuery):
             candidates_db: List[Tuple[str, Dict[str, Any]]] = []
             for i in range(k):
                 shots_i = _rotate_shots(base_shots_db, i)
-                sql_i = run_llm(build_prompt(payload.query, sliced2, shots_i))
+                prompt2 = build_prompt(payload.query, sliced2, shots_i)
+                try:
+                    sql_i = run_llm(prompt2)
+                except ValueError as e:
+                    if "context window" in str(e).lower():
+                        tiny_tables2 = dict(list(sliced2.get("tables", {}).items())[:6])
+                        tiny_schema2 = {"tables": tiny_tables2, "relationships": []}
+                        sql_i = run_llm(build_prompt(payload.query, tiny_schema2, shots_i[:1]))
+                    else:
+                        return JSONResponse({"error": "llm_error", "detail": str(e), "path": "db_fallback"}, status_code=500)
+                sql_i = postprocess_sql(payload.query, sql_i, db_schema)
                 analysis_i = validate_sql(sql_i, db_schema)
                 candidates_db.append((sql_i, analysis_i))
             sql2, analysis2 = _pick_best(candidates_db)

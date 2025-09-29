@@ -1,7 +1,6 @@
 package services
 
 import (
-	"abdo/config"
 	"bytes"
 	"context"
 	"database/sql"
@@ -10,12 +9,15 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"gorm.io/gorm"
+
+	"abdo/config"
 )
 
 // Upstream (Python FastAPI) request/response contracts
@@ -173,6 +175,53 @@ func normalizeSQLKey(s string) string {
 	return strings.Join(fields, " ")
 }
 
+// Dialect normalizer: fixes common non-MySQL constructs emitted by LLMs.
+// - INTERVAL '1 month'  => INTERVAL 1 MONTH
+// - ORDER BY expr NULLS LAST  => ORDER BY expr IS NULL, expr [ASC|DESC]
+// - ORDER BY expr NULLS FIRST => ORDER BY expr IS NOT NULL, expr [ASC|DESC]
+var (
+	reIntervalQuoted = regexp.MustCompile(`(?i)INTERVAL\s+'(\d+)'\s+([A-Za-z]+)`)
+	reNullsLast      = regexp.MustCompile(`(?i)ORDER\s+BY\s+([^\s,;]+)\s*(ASC|DESC)?\s+NULLS\s+LAST\b`)
+	reNullsFirst     = regexp.MustCompile(`(?i)ORDER\s+BY\s+([^\s,;]+)\s*(ASC|DESC)?\s+NULLS\s+FIRST\b`)
+)
+
+func normalizeMySQL(s string) string {
+	out := s
+
+	// 1) INTERVAL 'n unit' -> INTERVAL n UNIT
+	out = reIntervalQuoted.ReplaceAllString(out, "INTERVAL $1 $2")
+
+	// 2) NULLS LAST
+	out = reNullsLast.ReplaceAllStringFunc(out, func(m string) string {
+		sub := reNullsLast.FindStringSubmatch(m)
+		if len(sub) >= 3 {
+			expr := sub[1]
+			dir := strings.TrimSpace(sub[2])
+			if dir != "" {
+				dir = " " + dir
+			}
+			return "ORDER BY " + expr + " IS NULL, " + expr + dir
+		}
+		return m
+	})
+
+	// 3) NULLS FIRST
+	out = reNullsFirst.ReplaceAllStringFunc(out, func(m string) string {
+		sub := reNullsFirst.FindStringSubmatch(m)
+		if len(sub) >= 3 {
+			expr := sub[1]
+			dir := strings.TrimSpace(sub[2])
+			if dir != "" {
+				dir = " " + dir
+			}
+			return "ORDER BY " + expr + " IS NOT NULL, " + expr + dir
+		}
+		return m
+	})
+
+	return out
+}
+
 func getFromExecCache(key string) *ExecResult {
 	now := time.Now()
 	execCacheMu.Lock()
@@ -240,6 +289,9 @@ func ExecuteSelect(db *gorm.DB, sqlStr string) (*ExecResult, error) {
 	if !IsSelectOnly(sqlStr) {
 		return nil, errors.New("only SELECT queries are allowed")
 	}
+
+	// Apply MySQL dialect normalization (fix NULLS LAST, quoted INTERVAL, etc.)
+	sqlStr = normalizeMySQL(sqlStr)
 
 	// Try result cache first
 	key := normalizeSQLKey(sqlStr)
